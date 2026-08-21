@@ -7,14 +7,25 @@ namespace Porta.Pty.Windows
     using System.Diagnostics;
     using System.IO;
     using System.Runtime.InteropServices;
+    using System.Runtime.Versioning;
     using Microsoft.Win32.SafeHandles;
-    using Vanara.PInvoke;
-    using static Vanara.PInvoke.Kernel32;
-    using static Porta.Pty.Windows.NativeMethods;
 
     /// <summary>
     /// A connection to a pseudoterminal spawned by native windows APIs.
     /// </summary>
+    /// <remarks>
+    /// Windows-only, and specifically Windows 10 1809 or later: ConPTY does not exist before that, and
+    /// <see cref="NativeMethods.IsPseudoConsoleSupported"/> is the runtime gate that says so with a
+    /// PlatformNotSupportedException naming the version.
+    ///
+    /// The VERSION in the annotation is not decoration. CsWin32's generated entry points carry their
+    /// own floors (windows5.1.2600 for the job-object calls, windows6.0.6000 for the attribute-list
+    /// ones), and a bare "windows" annotation does not satisfy them -- the platform-compatibility
+    /// analyzer reported 22 warnings saying exactly that. Stating the real minimum satisfies all of
+    /// them truthfully, where suppressing would have hidden a genuine question about which Windows
+    /// versions this library supports.
+    /// </remarks>
+    [SupportedOSPlatform("windows10.0.17763")]
     internal sealed class PseudoConsoleConnection : IPtyConnection
     {
         private readonly Process process;
@@ -131,12 +142,7 @@ namespace Porta.Pty.Windows
                 throw new ObjectDisposedException(nameof(PseudoConsoleConnection));
             }
 
-            var coord = new COORD { X = (short)cols, Y = (short)rows };
-            var hr = ResizePseudoConsole(handles.PseudoConsoleHandle, coord);
-            if (hr.Failed)
-            {
-                throw new InvalidOperationException($"Could not resize pseudo console: {hr}", hr.GetException());
-            }
+            handles.PseudoConsoleHandle.Resize(cols, rows);
         }
 
         /// <inheritdoc/>
@@ -172,13 +178,13 @@ namespace Porta.Pty.Windows
             /// <param name="mainThreadHandle">the handle to the main thread.</param>
             /// <param name="jobObjectHandle">the handle to the job object that manages process lifetime.</param>
             public PseudoConsoleConnectionHandles(
-                SafeHPIPE inPipeOurSide,
-                SafeHPIPE outPipeOurSide,
-                SafeHPCON pseudoConsoleHandle,
-                SafeHPROCESS processHandle,
+                SafeFileHandle inPipeOurSide,
+                SafeFileHandle outPipeOurSide,
+                PseudoConsole pseudoConsoleHandle,
+                SafeFileHandle processHandle,
                 int pid,
-                SafeHTHREAD mainThreadHandle,
-                SafeHJOB jobObjectHandle)
+                SafeFileHandle mainThreadHandle,
+                SafeFileHandle jobObjectHandle)
             {
                 this.InPipeOurSide = inPipeOurSide;
                 this.OutPipeOurSide = outPipeOurSide;
@@ -192,22 +198,22 @@ namespace Porta.Pty.Windows
             /// <summary>
             /// Gets the input pipe on the local side (we write to this to send to console).
             /// </summary>
-            internal SafeHPIPE InPipeOurSide { get; }
+            internal SafeFileHandle InPipeOurSide { get; }
 
             /// <summary>
             /// Gets the output pipe on the local side (we read from this to get console output).
             /// </summary>
-            internal SafeHPIPE OutPipeOurSide { get; }
+            internal SafeFileHandle OutPipeOurSide { get; }
 
             /// <summary>
             /// Gets the handle to the pseudoconsole.
             /// </summary>
-            internal SafeHPCON PseudoConsoleHandle { get; }
+            internal PseudoConsole PseudoConsoleHandle { get; }
 
             /// <summary>
             /// Gets the handle to the spawned process.
             /// </summary>
-            internal SafeHPROCESS ProcessHandle { get; }
+            internal SafeFileHandle ProcessHandle { get; }
 
             /// <summary>
             /// Gets the process ID.
@@ -217,13 +223,13 @@ namespace Porta.Pty.Windows
             /// <summary>
             /// Gets the handle to the main thread.
             /// </summary>
-            internal SafeHTHREAD MainThreadHandle { get; }
+            internal SafeFileHandle MainThreadHandle { get; }
 
             /// <summary>
             /// Gets the handle to the job object that manages process lifetime.
             /// When this handle is closed, all processes assigned to the job are terminated.
             /// </summary>
-            internal SafeHJOB JobObjectHandle { get; }
+            internal SafeFileHandle JobObjectHandle { get; }
         }
     }
 }

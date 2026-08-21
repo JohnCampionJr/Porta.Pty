@@ -8,18 +8,35 @@ namespace Porta.Pty.Windows
     using System.ComponentModel;
     using System.Diagnostics;
     using System.IO;
-    using System.Runtime.CompilerServices;
     using System.Runtime.InteropServices;
+    using System.Runtime.Versioning;
     using System.Text;
     using System.Threading;
     using System.Threading.Tasks;
-    using Vanara.PInvoke;
-    using static Vanara.PInvoke.Kernel32;
+    using Microsoft.Win32.SafeHandles;
+    // global:: is required, not stylistic. This namespace is Porta.Pty.WINDOWS, so an unqualified
+    // `using Windows.Win32` binds relative to it and looks for Porta.Pty.Windows.Windows.Win32.
+    using global::Windows.Win32;
+    using global::Windows.Win32.Foundation;
+    using global::Windows.Win32.System.Threading;
     using static Porta.Pty.Windows.NativeMethods;
 
     /// <summary>
     /// Provides a pty connection for windows machines using PseudoConsole.
     /// </summary>
+    /// <remarks>
+    /// Windows-only, and specifically Windows 10 1809 or later: ConPTY does not exist before that, and
+    /// <see cref="NativeMethods.IsPseudoConsoleSupported"/> is the runtime gate that says so with a
+    /// PlatformNotSupportedException naming the version.
+    ///
+    /// The VERSION in the annotation is not decoration. CsWin32's generated entry points carry their
+    /// own floors (windows5.1.2600 for the job-object calls, windows6.0.6000 for the attribute-list
+    /// ones), and a bare "windows" annotation does not satisfy them -- the platform-compatibility
+    /// analyzer reported 22 warnings saying exactly that. Stating the real minimum satisfies all of
+    /// them truthfully, where suppressing would have hidden a genuine question about which Windows
+    /// versions this library supports.
+    /// </remarks>
+    [SupportedOSPlatform("windows10.0.17763")]
     internal class PtyProvider : IPtyProvider
     {
         /// <inheritdoc/>
@@ -41,7 +58,16 @@ namespace Porta.Pty.Windows
         private static string GetAppOnPath(string app, string cwd, IDictionary<string, string> env)
         {
             bool isWow64 = Environment.GetEnvironmentVariable("PROCESSOR_ARCHITEW6432") != null;
+
+            // %WINDIR% was trusted to exist. Where it does not, every Path.Combine below threw
+            // ArgumentNullException from the FIRST line of app resolution -- a failure that names
+            // neither the app being resolved nor the missing variable. SpecialFolder.Windows asks the
+            // OS the same question without going through the environment.
             var windir = Environment.GetEnvironmentVariable("WINDIR");
+            if (string.IsNullOrEmpty(windir))
+            {
+                windir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            }
             var sysnativePath = Path.Combine(windir, "Sysnative");
             var sysnativePathWithSlash = sysnativePath + Path.DirectorySeparatorChar;
             var system32Path = Path.Combine(windir, "System32");
@@ -91,7 +117,7 @@ namespace Porta.Pty.Windows
                 throw new ArgumentException($"Terminal app path '{app}' is too long");
             }
 
-            string pathEnvironment = (env != null && env.TryGetValue("PATH", out string p) ? p : null)
+            string? pathEnvironment = (env != null && env.TryGetValue("PATH", out string? p) ? p : null)
                 ?? Environment.GetEnvironmentVariable("PATH");
 
             if (string.IsNullOrWhiteSpace(pathEnvironment))
@@ -185,52 +211,38 @@ namespace Porta.Pty.Windows
             return result.ToString();
         }
 
-        private Task<IPtyConnection> StartPseudoConsoleAsync(
+        private unsafe Task<IPtyConnection> StartPseudoConsoleAsync(
            PtyOptions options,
            TraceSource trace,
            CancellationToken cancellationToken)
         {
             // Create a Job Object to ensure child processes are killed when the terminal exits.
             // This prevents zombie ConPTY sessions by using JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
-            SafeHJOB jobObjectHandle = JobObject.Create();
+            SafeFileHandle jobObjectHandle = JobObject.Create();
+
+            // Declared out here so the catch can close it. Vanara's SafeHPCON had a finalizer, which
+            // covered this by accident; PseudoConsole is a plain IDisposable, so the failure path has
+            // to say so. Leaking one strands a conhost.exe (or OpenConsole.exe) per failed spawn.
+            PseudoConsole? pseudoConsole = null;
 
             try
             {
-                // Create the in/out pipes using Vanara
-                if (!CreatePipe(out var inPipePseudoConsoleSide, out var inPipeOurSide, null, 0))
+                if (!PInvoke.CreatePipe(out var inPipePseudoConsoleSide, out var inPipeOurSide, null, 0))
                 {
                     throw new InvalidOperationException("Could not create an anonymous pipe", new Win32Exception());
                 }
 
-                if (!CreatePipe(out var outPipeOurSide, out var outPipePseudoConsoleSide, null, 0))
+                if (!PInvoke.CreatePipe(out var outPipeOurSide, out var outPipePseudoConsoleSide, null, 0))
                 {
                     throw new InvalidOperationException("Could not create an anonymous pipe", new Win32Exception());
                 }
 
-                var coord = new COORD { X = (short)options.Cols, Y = (short)options.Rows };
-                SafeHPCON pseudoConsoleHandle;
-                HRESULT hr;
-                
-                RuntimeHelpers.PrepareConstrainedRegions();
-                try
-                {
-                    // Run CreatePseudoConsole in a CER to make sure we don't leak handles.
-                }
-                finally
-                {
-                    // Create the Pseudo Console, using the pipes
-                    hr = CreatePseudoConsole(
-                        coord,
-                        new SafeHFILE(inPipePseudoConsoleSide.DangerousGetHandle(), false),
-                        new SafeHFILE(outPipePseudoConsoleSide.DangerousGetHandle(), false),
-                        0,
-                        out pseudoConsoleHandle);
-                }
-
-                if (hr.Failed)
-                {
-                    throw new InvalidOperationException($"Could not create pseudo console: {hr}", hr.GetException());
-                }
+                // Either ConPTY implementation, chosen at runtime by PORTAPTY_CONPTY. See PseudoConsole.
+                pseudoConsole = PseudoConsole.Create(
+                    (short)options.Cols,
+                    (short)options.Rows,
+                    inPipePseudoConsoleSide.DangerousGetHandle(),
+                    outPipePseudoConsoleSide.DangerousGetHandle());
 
                 // IMPORTANT: Close the pseudoconsole side of the pipes after CreatePseudoConsole
                 // The pseudoconsole now owns these handles, and keeping them open on our side
@@ -239,8 +251,8 @@ namespace Porta.Pty.Windows
                 outPipePseudoConsoleSide.Dispose();
 
                 // Prepare the StartupInfoEx structure attached to the ConPTY.
-                var startupInfo = new STARTUPINFOEX();
-                startupInfo.InitAttributeListAttachedToConPTY(pseudoConsoleHandle);
+                var startupInfo = new STARTUPINFOEXW();
+                startupInfo.InitAttributeListAttachedToConPTY(pseudoConsole.Handle);
                 
                 try
                 {
@@ -266,20 +278,17 @@ namespace Porta.Pty.Windows
                         commandLine.Append(arguments);
                     }
 
-                    trace.TraceInformation($"Starting terminal process '{app}' with command line {commandLine}");
+                    trace.TraceInformation(
+                        $"Starting terminal process '{app}' with command line {commandLine} "
+                        + $"via {pseudoConsole.Implementation}");
 
-                    SafeHPROCESS? processHandle = null;
-                    SafeHTHREAD? mainThreadHandle = null;
+                    SafeFileHandle? processHandle = null;
+                    SafeFileHandle? mainThreadHandle = null;
                     int pid = 0;
                     bool success = false;
                     
-                    RuntimeHelpers.PrepareConstrainedRegions();
-                    try
                     {
-                        // Run CreateProcess in a CER to make sure we don't leak handles.
-                    }
-                    finally
-                    {
+                        // Was a CER too; see the note on CreatePseudoConsole above.
                         // Build the environment block from the options
                         string environmentBlock = GetEnvironmentString(options.Environment);
                         
@@ -288,14 +297,32 @@ namespace Porta.Pty.Windows
                         try
                         {
                             // Call the Win32 CreateProcess
-                            var processInfoRaw = new PROCESS_INFORMATION();
+                            var processInfoRaw = default(PROCESS_INFORMATION);
                             success = CreateProcessW(
-                                null!,   // lpApplicationName
+                                null,   // lpApplicationName
                                 commandLine.ToString(),
                                 IntPtr.Zero,   // lpProcessAttributes
                                 IntPtr.Zero,   // lpThreadAttributes
                                 false,  // bInheritHandles VERY IMPORTANT that this is false
-                                (uint)(CREATE_PROCESS.EXTENDED_STARTUPINFO_PRESENT | CREATE_PROCESS.CREATE_UNICODE_ENVIRONMENT), // dwCreationFlags
+                                // CREATE_SUSPENDED so the child cannot outrun its assignment to the job
+                                // object. Without it, CreateProcessW returns with the process ALREADY
+                                // RUNNING, and a short-lived command can be gone before
+                                // AssignProcessToJobObject executes -- which then fails, because a
+                                // process that has exited cannot be assigned to a job. Observed on a
+                                // 4-vCPU Windows runner at 96 concurrent spawns: "Failed to assign
+                                // process to job object", with the run reporting 95 of 96 delivered
+                                // and one that never started at all.
+                                //
+                                // It is contention-shaped, so it gets worse exactly when a machine is
+                                // busy, and it fails the SPAWN rather than losing output -- a caller
+                                // sees an exception where it expected a process.
+                                //
+                                // The thread is resumed immediately after the assignment below. This is
+                                // the documented ordering for job assignment, and it is why the main
+                                // thread handle is kept rather than closed here.
+                                (uint)(PROCESS_CREATION_FLAGS.EXTENDED_STARTUPINFO_PRESENT
+                                    | PROCESS_CREATION_FLAGS.CREATE_UNICODE_ENVIRONMENT
+                                    | PROCESS_CREATION_FLAGS.CREATE_SUSPENDED), // dwCreationFlags
                                 environmentHandle.AddrOfPinnedObject(),   // lpEnvironment - pass the environment block
                                 options.Cwd,
                                 ref startupInfo,
@@ -303,18 +330,42 @@ namespace Porta.Pty.Windows
 
                             if (success)
                             {
-                                // Create Vanara safe handles from raw handles
-                                var hProcessPtr = (IntPtr)processInfoRaw.hProcess.DangerousGetHandle();
-                                var hThreadPtr = (IntPtr)processInfoRaw.hThread.DangerousGetHandle();
-                                
-                                processHandle = new SafeHPROCESS(hProcessPtr, true);
-                                mainThreadHandle = new SafeHTHREAD(hThreadPtr, true);
+                                // PROCESS_INFORMATION carries raw HANDLEs; wrap them so disposal is
+                                // ordinary. ownsHandle: true, matching what the Vanara handles did.
+                                var hProcessPtr = (IntPtr)processInfoRaw.hProcess.Value;
+                                var hThreadPtr = (IntPtr)processInfoRaw.hThread.Value;
+
+                                processHandle = new SafeFileHandle(hProcessPtr, ownsHandle: true);
+                                mainThreadHandle = new SafeFileHandle(hThreadPtr, ownsHandle: true);
                                 pid = (int)processInfoRaw.dwProcessId;
 
                                 // Assign the process to the job object immediately after creation.
                                 // This ensures the process and any children it spawns will be terminated
                                 // when the job handle is closed (e.g., when our terminal crashes).
-                                JobObject.AssignProcess(jobObjectHandle, hProcessPtr);
+                                //
+                                // The child is SUSPENDED here and stays that way until ResumeThread
+                                // below, so this can no longer lose a race against a fast command. If
+                                // either step throws, the suspended child is killed rather than left
+                                // frozen forever: it is not in the job yet, so closing the job would not
+                                // reap it, and it would sit in the process table until the box reboots.
+                                try
+                                {
+                                    JobObject.AssignProcess(jobObjectHandle, hProcessPtr);
+
+                                    if (PInvoke.ResumeThread((HANDLE)hThreadPtr) == unchecked((uint)-1))
+                                    {
+                                        throw new InvalidOperationException(
+                                            "Could not resume the terminal process after assigning it to "
+                                            + "the job object",
+                                            new Win32Exception());
+                                    }
+                                }
+                                catch
+                                {
+                                    try { PInvoke.TerminateProcess((HANDLE)hProcessPtr, 1); }
+                                    catch (Exception) { /* nothing left to try */ }
+                                    throw;
+                                }
                             }
                         }
                         finally
@@ -333,13 +384,14 @@ namespace Porta.Pty.Windows
                     var connectionOptions = new PseudoConsoleConnection.PseudoConsoleConnectionHandles(
                         inPipeOurSide,
                         outPipeOurSide,
-                        pseudoConsoleHandle,
+                        pseudoConsole,
                         processHandle!,
                         pid,
                         mainThreadHandle!,
                         jobObjectHandle);
 
                     var result = new PseudoConsoleConnection(connectionOptions);
+                    AnswerDeviceAttributes(result, pseudoConsole);
                     return Task.FromResult<IPtyConnection>(result);
                 }
                 finally
@@ -349,24 +401,84 @@ namespace Porta.Pty.Windows
             }
             catch
             {
-                // If anything fails, make sure to dispose the job object
+                // If anything fails, make sure to dispose the pseudoconsole and the job object
+                pseudoConsole?.Dispose();
                 jobObjectHandle?.Dispose();
                 throw;
             }
         }
 
-        // P/Invoke for CreateProcessW since Vanara's wrapper is complex for our needs
+        /// <summary>
+        /// Answers the pseudoconsole's startup question, so that consumers do not have to.
+        ///
+        /// <para>ConPTY's <c>VtIo::StartIfNeeded</c> emits, on startup, a cursor-position report
+        /// request, a Primary Device Attributes query (<c>ESC[c</c> — "what terminal are you?"), and
+        /// then calls <c>WaitUntilDA1(3000)</c>: it BLOCKS for up to three seconds waiting for the DA1
+        /// response, and on timeout gives up with <c>StartupFailed</c> and continues anyway.</para>
+        ///
+        /// <para>A consumer that only READS a PTY never answers, so it pays that three seconds on every
+        /// pseudoconsole. Measured here, sequential spawns: <c>[3016,3012,3011,3013,3019]</c> without
+        /// the answer, <c>[15,9,9,8,8]</c> with it. That is the entire difference between out-of-band
+        /// ConPTY looking unusable and it being faster than in-box.</para>
+        ///
+        /// <para>Sent UNCONDITIONALLY and immediately, not in response to observing <c>ESC[c</c>.
+        /// Reacting to the query was measured and does not work — it races the handshake and usually
+        /// arrives after <c>WaitUntilDA1</c> has already given up.</para>
+        ///
+        /// <para>Only on the out-of-band path, because only it asks. In-box ConPTY emits no query, so
+        /// the same bytes would not be consumed by a handshake and would reach the child as keyboard
+        /// input instead.</para>
+        ///
+        /// <para>Never fatal. If this write fails the terminal still works; it simply pays the timeout
+        /// it would have paid anyway.</para>
+        /// </summary>
+        private static void AnswerDeviceAttributes(IPtyConnection connection, PseudoConsole pseudoConsole)
+        {
+            if (!pseudoConsole.IsOutOfBand)
+            {
+                return;
+            }
+
+            // "VT100 with Advanced Video Option". What it claims matters far less than that it is a
+            // well-formed DA1 response and that it arrives.
+            var reply = Encoding.ASCII.GetBytes("\u001b[?1;2c");
+
+            try
+            {
+                connection.WriterStream.Write(reply, 0, reply.Length);
+                connection.WriterStream.Flush();
+            }
+            catch (Exception)
+            {
+                // The terminal still works; it just pays the three seconds.
+            }
+        }
+
+        /// <summary>
+        /// Hand-written rather than generated, and it has to be.
+        ///
+        /// <para>CsWin32 projects CreateProcess with a <c>STARTUPINFOW*</c>, and this call needs a
+        /// <c>STARTUPINFOEXW</c> — the extended form whose first field IS a STARTUPINFOW, which is what
+        /// makes EXTENDED_STARTUPINFO_PRESENT work. Passing the extended struct through the generated
+        /// signature would mean casting the pointer at every call site, which is the same unsafe act
+        /// with less of a place to explain itself.</para>
+        ///
+        /// <para><c>lpCommandLine</c> is deliberately a <c>string</c>: CreateProcessW may WRITE to that
+        /// buffer, and the marshaller hands it a copy. Passing a pinned managed string directly would
+        /// let Windows mutate an interned literal.</para>
+        /// </summary>
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CreateProcessW(
-            string lpApplicationName,
+            string? lpApplicationName,
             string lpCommandLine,
             IntPtr lpProcessAttributes,
             IntPtr lpThreadAttributes,
-            bool bInheritHandles,
+            [MarshalAs(UnmanagedType.Bool)] bool bInheritHandles,
             uint dwCreationFlags,
             IntPtr lpEnvironment,
             string lpCurrentDirectory,
-            ref STARTUPINFOEX lpStartupInfo,
+            ref STARTUPINFOEXW lpStartupInfo,
             out PROCESS_INFORMATION lpProcessInformation);
     }
 }

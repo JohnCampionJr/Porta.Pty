@@ -19,6 +19,33 @@ namespace Porta.Pty
         private static readonly TraceSource Trace = new TraceSource(nameof(PtyProvider));
 
         /// <summary>
+        /// Gets the pseudoconsole implementation this process will use, for diagnostics and logging.
+        ///
+        /// <para>Worth exposing because the choice is no longer a simple reading of the environment:
+        /// on Windows the default is out-of-band with an automatic fallback to in-box when conpty.dll
+        /// is absent, so <c>PORTAPTY_CONPTY</c> does not tell you what is actually in play. Anything
+        /// reporting the implementation from the environment variable will be wrong exactly when the
+        /// fallback fires.</para>
+        /// </summary>
+        public static string PseudoConsoleImplementation
+        {
+            get
+            {
+                if (!OperatingSystem.IsWindows())
+                {
+                    return "posix";
+                }
+
+                // Same suppression and same reason as PlatformServices: the Windows types declare a
+                // version floor that OperatingSystem.IsWindows() alone cannot assert, and reading a
+                // static bool is harmless on any Windows.
+#pragma warning disable CA1416
+                return Windows.PseudoConsole.UseOutOfBand ? "oob" : "inbox";
+#pragma warning restore CA1416
+            }
+        }
+
+        /// <summary>
         /// Spawn a new process connected to a pseudoterminal.
         /// </summary>
         /// <param name="options">The set of options for creating the pseudoterminal.</param>
@@ -63,7 +90,17 @@ namespace Porta.Pty
                 environment = new Dictionary<string, string>(PlatformServices.EnvironmentVariableComparer);
                 foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
                 {
-                    environment[entry.Key.ToString()] = entry.Value.ToString();
+                    // DictionaryEntry is the pre-generics shape: Key is object and Value is object?,
+                    // so both ToString() calls were unguarded. In practice the environment yields
+                    // neither a null key nor a null value, which is exactly why this would have
+                    // surfaced as a NullReferenceException from inside a foreach on a good day and
+                    // never on a bad one.
+                    if (entry.Key.ToString() is not { } key)
+                    {
+                        continue;
+                    }
+
+                    environment[key] = entry.Value?.ToString() ?? string.Empty;
                 }
             }
 

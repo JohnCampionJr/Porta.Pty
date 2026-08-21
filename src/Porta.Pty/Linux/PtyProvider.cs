@@ -75,23 +75,29 @@ namespace Porta.Pty.Linux
             if (result.Pid == -1)
             {
                 throw new InvalidOperationException(
-                    $"pty_spawn failed with error {result.Error}: {GetErrorMessage(result.Error)}");
+                    $"pty_spawn failed for '{options.App}': error={result.Error} "
+                    + $"({GetErrorMessage(result.Error)}), masterFd={result.MasterFd}, pid={result.Pid}");
             }
             
             return Task.FromResult<IPtyConnection>(new PtyConnection(result.MasterFd, result.Pid));
         }
 
+        /// <remarks>
+        /// The curated switch covered four values and rendered everything else as the bare number, so
+        /// the interesting failures were exactly the ones it could not name. Win32Exception maps an
+        /// errno through strerror on Unix, which names all of them. A NON-POSITIVE value is reported as
+        /// such rather than translated: errno is never zero or negative, so seeing one means the result
+        /// struct did not carry what it was expected to, and that is a different problem than whatever
+        /// errno would have described.
+        /// </remarks>
         private static string GetErrorMessage(int errno)
         {
-            // Common errno values
-            return errno switch
+            if (errno <= 0)
             {
-                1 => "EPERM (Operation not permitted)",
-                2 => "ENOENT (No such file or directory)",
-                12 => "ENOMEM (Cannot allocate memory)",
-                13 => "EACCES (Permission denied)",
-                _ => $"errno {errno}"
-            };
+                return $"not an errno ({errno}); the native result struct did not carry one";
+            }
+
+            return new System.ComponentModel.Win32Exception(errno).Message;
         }
     }
 }

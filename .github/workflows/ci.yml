@@ -1,0 +1,395 @@
+# Build + test on all three platforms, on BLACKSMITH runners.
+#
+# Upstream shipped four workflows (one per OS plus a nuget.org publish). They are replaced by this
+# one: the publish pushed to nuget.org under upstream's package identity, which is not ours to use,
+# and three near-identical per-OS files drift apart the moment one is edited.
+#
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Keyed on head_ref where there is one, so a PR run and a manual dispatch on the same branch
+# collapse into one. Keying on github.ref alone does NOT do that — a pull_request event carries
+# refs/pull/N/merge while a dispatch carries refs/heads/<branch>, so the two never matched and every
+# manual run doubled the load. Learned the hard way downstream.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # A green run is ~2 minutes. The default is 360 MINUTES, which is how a wedged job bills for
+    # hours before anything stops it.
+    # A green run is ~2 minutes. Low deliberately: the default is 360 MINUTES, and a timeout exists
+    # to cap what a WEDGED job costs, not to leave headroom for one.
+    # A green run is ~2 minutes. Low deliberately: the default is 360 MINUTES, and a timeout
+    # exists to cap what a WEDGED job costs, not to leave headroom for one.
+    timeout-minutes: 6
+    strategy:
+      # Never cancel the other platforms: a failure on one is usually SPECIFIC to it, and the other
+      # legs are what tell you whether it is a platform bug or a real one.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # POSIX only. The shim wraps forkpty()+execvp() in C so that no managed code runs in the
+      # forked child — .NET 7 turned on W^X by default, which conflicts with fork(). Windows has no
+      # shim: it talks to ConPTY directly.
+      - name: Install cmake (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cmake build-essential
+
+      - name: Install cmake (macOS)
+        if: runner.os == 'macOS'
+        run: brew list cmake >/dev/null 2>&1 || brew install cmake
+
+      - name: Build native PTY shim
+        if: runner.os != 'Windows'
+        run: |
+          cd src/Porta.Pty.Native
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Restore
+        run: dotnet restore src/Porta.Pty.sln
+
+      - name: Build (Release)
+        run: dotnet build src/Porta.Pty.sln --configuration Release --no-restore
+
+      # The shim is built to src/Porta.Pty.Native/output/runtimes/<rid>/native, which is not on the
+      # test host's search path — the runtime looks beside the test assembly and in the shared
+      # framework, and finds neither. Upstream copied it in per-OS workflows; consolidating them is
+      # how it got lost, and the failure is a bare DllNotFoundException that says nothing about a
+      # missing BUILD step.
+      - name: Stage native shim beside the tests
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          # Pick the slice matching THIS host. `find … | head -1` is wrong on macOS: build.sh
+          # cross-compiles BOTH osx-x64 and osx-arm64, so the first hit is the x64 dylib and an
+          # arm64 runner then fails to load it — as a DllNotFoundException that looks identical to
+          # the library not having been built at all. Linux builds one slice, which is why it passed
+          # and macOS did not.
+          case "$(uname -s)-$(uname -m)" in
+            Darwin-arm64)   rid=osx-arm64   ;;
+            Darwin-x86_64)  rid=osx-x64     ;;
+            Linux-aarch64)  rid=linux-arm64 ;;
+            Linux-x86_64)   rid=linux-x64   ;;
+            *) echo "unrecognised host $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+          esac
+          out=$(find "src/Porta.Pty.Native/output/runtimes/$rid" -name 'libporta_pty.*' | head -1)
+          [ -n "$out" ] || { echo "no shim built for $rid" >&2; exit 1; }
+          echo "host=$(uname -s)-$(uname -m) rid=$rid shim=$out"
+          # Located rather than hard-coded: the test project is now RID-specific
+          # (UseCurrentRuntimeIdentifier), so its output moved from bin/Release/net10.0 to
+          # bin/Release/net10.0/<rid>. That was done so the ConPTY natives land in the app root; the
+          # side effect is that any hard-coded output path here silently stages the shim into an
+          # empty directory and the tests then die with DllNotFoundException.
+          d=$(dirname "$(find src/Porta.Pty.Tests/bin/Release -name 'Porta.Pty.Tests.dll' -print -quit)")
+          [ -n "$d" ] || { echo "could not locate the test output directory" >&2; exit 1; }
+          echo "staging into $d"
+          cp "$out" "$d/"
+
+      # ---------------------------------------------------------------------------------------------
+      # COMMENTED OUT: the repeated repro sweep. It measured 80 SECONDS of a ~145 second job -- more
+      # than half the bill, on every leg, forever -- and it has already served its purpose: it is what
+      # proved the PTY layer delivers 80 for 80 at the concurrency where the downstream consumer was losing output, which
+      # is how the hunt moved up the stack to the downstream task runner reader.
+      #
+      # What stays behind to cover the same ground much more cheaply: the "Job-object stress" step
+      # below (8s) and the ordinary Test step, which still runs every ConcurrentSpawnTests case once.
+      # The two Measure_* cases still print their SUMMARY line with latency percentiles, so a
+      # regression in the pooled-reader cost is still visible -- just not sampled five times.
+      #
+      # To bring it back: uncomment, and note that PORTAPTY_REPRO_SPAWNS sets the concurrency. The
+      # full harness also still exists on the windows-output-loss-repro branch here, and on
+      # portapty-winrunner-probe in the downstream consumer, which is what drives it against the self-hosted winrunners.
+      # ---------------------------------------------------------------------------------------------
+      # # The repro tests, run repeatedly and at escalating load, BEFORE the ordinary suite.
+      # #
+      # # One green Windows run does not clear ConPTY. Downstream, the same 24-spawn assertion
+      # # measured 10, 0, 6 and 0 losses out of 24 across four consecutive Windows runs -- so a
+      # # single clean sample is a coin landing heads, not evidence. This sweep takes five samples
+      # # in one job and keeps going after a failure, because WHICH iterations lost and how many
+      # # they lost is the signal; stopping at the first one throws that away.
+      # #
+      # # Escalating counts because the defect is contention-shaped: if 24 is clean and 96 is not,
+      # # that is itself the finding.
+      # - name: Repro sweep
+      #   id: sweep
+      #   continue-on-error: true
+      #   shell: bash
+      #   run: |
+      #     rc=0
+      #     # 24 is the number that matters: it is what the downstream consumer's guard uses and where its loss was
+      #     # measured. 48 is a headroom check. 96 was dropped for two reasons -- it measured how many
+      #     # job-object slots a box has rather than anything about readers (Windows fails
+      #     # AssignProcessToJobObject there, and macOS ran out of ptys at 48 before that was fixed),
+      #     # and the two 96 iterations were most of a 5m19s sweep. Runners bill by the minute.
+      #     for spawns in 24 48; do
+      #       echo "::group::spawns=$spawns"
+      #       # --filter and --timeout are MTP RUNNER options, so they belong after a bare --. The
+      #       # VSTest-style form happens to still be accepted by this SDK, which is why it ran green
+      #       # while being wrong; the runner form is documented and --timeout only exists there.
+      #       # --timeout caps a wedged test at 3m instead of letting it ride the job timeout.
+      #       if PORTAPTY_REPRO_SPAWNS=$spawns dotnet test src/Porta.Pty.sln \
+      #            --configuration Release --no-build \
+      #            -- --filter "FullyQualifiedName~ConcurrentSpawnTests" --timeout 3m; then
+      #         echo "spawns=$spawns OK"
+      #       else
+      #         echo "spawns=$spawns FAILED"
+      #         rc=1
+      #       fi
+      #       echo "::endgroup::"
+      #     done
+      #     echo "sweep_rc=$rc" >> "$GITHUB_OUTPUT"
+      #     exit $rc
+
+      # ---------------------------------------------------------------------------------------------
+      # COMMENTED OUT: the ConPTY A/B. The question it existed to answer is answered.
+      #
+      # Measured on native x64, with a process census confirming which implementation was live
+      # (peakOpenConsole 1 at n=1, 24 at n=24, and 0 on every in-box arm):
+      #
+      #   spawns  shell            in-box     out-of-band
+      #        1  cmd /c echo       27 ms        3048 ms     113x
+      #        1  pwsh -Encoded    142 ms        3138 ms      22x
+      #       24  cmd /c echo       75 ms        3096 ms      41x
+      #       24  pwsh -Encoded   1336 ms        4207 ms     3.2x
+      #
+      # Out-of-band costs ~3.0s whether you open one pseudoconsole or twenty-four, so it is a fixed
+      # cost rather than a per-terminal one. the downstream consumer's entire PTY surface is two files -- run targets
+      # and the terminal panes; git, gh and the agent CLIs all use Process.Start -- so the realistic
+      # concurrency is one terminal at a time. A user would wait ~3 seconds for their first terminal
+      # instead of 27ms. Default stays in-box, which showed no defect in anything measured.
+      #
+      # Two caveats, in case this is ever revisited. The data cannot separate "fixed per process"
+      # from "fixed per pseudoconsole, paid concurrently" -- 24 at 3.1s fits both, and sequential
+      # spawns in one process would be needed to tell. And the 3 seconds may be Defender/SmartScreen
+      # verifying an unsigned 1MB binary launched from a CI working directory, which would not
+      # reproduce for a signed, installed app.
+      #
+      # The wiring stays in the library behind PORTAPTY_CONPTY=oob, and it now WORKS -- getting there
+      # needed three things, each of which fails silently on its own: the ConptyRequires*Host flags so
+      # a host is staged at all, DefaultDllImportSearchPaths(AssemblyDirectory) so Windows 11's own
+      # System32\conpty.dll cannot win, and a RID-specific output so conpty.dll sits in the app root
+      # beside the <arch>/ host folders. Without the census, all three failures look like a green run.
+      # ---------------------------------------------------------------------------------------------
+      # # ConPTY A/B, Windows only, with a process census.
+      # #
+      # # The census is the load-bearing part and was learned the hard way: in-box spawns a conhost.exe
+      # # per pseudoconsole and out-of-band spawns an OpenConsole.exe, so counting them is the only
+      # # direct evidence of which implementation is live. Three earlier attempts at this comparison
+      # # reported near-identical latencies because the "oob" arm was quietly running conhost --
+      # # peakOpenConsole was ZERO on both arms -- and nothing errored to say so.
+      # #
+      # # This leg is native x64. The winrunners are ARM64 with an x64 SDK, so OpenConsole runs emulated
+      # # there and measured 8-15x slower than in-box on time-to-first-output. This is what separates
+      # # "out-of-band is slow" from "out-of-band is slow under emulation".
+      # - name: ConPTY A/B (Windows)
+      #   if: always() && runner.os == 'Windows'
+      #   shell: pwsh
+      #   run: |
+      #     $dir = Split-Path (Get-ChildItem -Recurse -Filter Porta.Pty.Tests.dll src/Porta.Pty.Tests/bin/Release |
+      #                        Select-Object -First 1).FullName -Parent
+      #     if (-not (Test-Path (Join-Path $dir 'conpty.dll'))) {
+      #       Write-Host "::error::conpty.dll is not in the app root; the oob arm would silently use conhost"; exit 1
+      #     }
+      #     # A FILE, because MTP surfaces a test's console output only when the test FAILS and every
+      #     # number here comes from a passing run.
+      #     $env:PORTAPTY_SUMMARY_FILE = Join-Path $PWD "ab-summary.txt"
+      #     Remove-Item $env:PORTAPTY_SUMMARY_FILE -ErrorAction SilentlyContinue
+      #     # 1 as well as 24. The 24-spawn number answers "what does a burst cost", and out-of-band
+      #     # measured 21x there. But the downstream consumer opens terminals one at a time, and a fixed per-pseudoconsole
+      #     # startup cost that is invisible at n=1 is a completely different decision from one that is
+      #     # not. Measuring only the burst would have answered the wrong question confidently.
+      #     foreach ($spawns in @('1','24')) {
+      #     $env:PORTAPTY_REPRO_SPAWNS = $spawns
+      #     foreach ($impl in @('inbox','oob')) {
+      #       if ($impl -eq 'oob') { $env:PORTAPTY_CONPTY = 'oob' }
+      #       else { $env:PORTAPTY_CONPTY = 'inbox' }   # explicit: unset now means "default", which is oob
+      #       foreach ($case in @('Concurrent_MinimalShell_DedicatedThreadReader',
+      #                           'Concurrent_RealisticShell_DedicatedThreadReader')) {
+      #         $proc = Start-Process -FilePath dotnet -PassThru -NoNewWindow -RedirectStandardOutput case.log `
+      #           -ArgumentList @('test','src/Porta.Pty.sln','--configuration','Release','--no-build',
+      #                           '--filter',"FullyQualifiedName~$case")
+      #         $oc = 0; $ch = 0
+      #         while (-not $proc.HasExited) {
+      #           $oc = [Math]::Max($oc, @(Get-Process OpenConsole -ErrorAction SilentlyContinue).Count)
+      #           $ch = [Math]::Max($ch, @(Get-Process conhost     -ErrorAction SilentlyContinue).Count)
+      #           Start-Sleep -Milliseconds 100
+      #         }
+      #         $proc.WaitForExit()
+      #         Write-Host "CENSUS spawns=$spawns conpty=$impl $case peakOpenConsole=$oc peakConhost=$ch exit=$($proc.ExitCode)"
+      #       }
+      #     }
+      #     }
+      #     Write-Host "===== results ====="
+      #     Get-Content $env:PORTAPTY_SUMMARY_FILE | ForEach-Object { Write-Host "AB $_" }
+
+      # Cold vs warm, Windows only. Sequential spawns, both ConPTY implementations, so the FIRST
+      # pseudoconsole is separated from the rest.
+      #
+      # This exists to settle the one thing the A/B could not: out-of-band measured ~3.0s at both n=1
+      # and n=24, which fits a once-per-process cost and a per-pseudoconsole cost equally well, since
+      # under either model concurrent spawns all land together. The answers differ -- a once-per-process
+      # cost hides behind a warm-up at startup and is then never noticed, while a per-pseudoconsole cost
+      # is paid by every terminal a user opens and cannot be hidden.
+      - name: ConPTY cold vs warm (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PORTAPTY_SUMMARY_FILE = Join-Path $PWD "sequence.txt"
+          Remove-Item $env:PORTAPTY_SUMMARY_FILE -ErrorAction SilentlyContinue
+          $env:PORTAPTY_SEQUENCE = '8'
+          foreach ($impl in @('inbox','oob')) {
+            if ($impl -eq 'oob') { $env:PORTAPTY_CONPTY = 'oob' }
+            else { $env:PORTAPTY_CONPTY = 'inbox' }   # explicit: unset now means "default", which is oob
+            $proc = Start-Process -FilePath dotnet -PassThru -NoNewWindow -RedirectStandardOutput seq.log `
+              -ArgumentList @('test','src/Porta.Pty.sln','--configuration','Release','--no-build',
+                              '--filter','FullyQualifiedName~Sequential_ColdVersusWarm')
+            $oc = 0
+            while (-not $proc.HasExited) {
+              $oc = [Math]::Max($oc, @(Get-Process OpenConsole -ErrorAction SilentlyContinue).Count)
+              Start-Sleep -Milliseconds 100
+            }
+            $proc.WaitForExit()
+            Write-Host "SEQCENSUS conpty=$impl peakOpenConsole=$oc exit=$($proc.ExitCode)"
+          }
+          Get-Content $env:PORTAPTY_SUMMARY_FILE | ForEach-Object { Write-Host "SEQ $_" }
+
+          # Same sequence with a child that STAYS ALIVE after writing. Every other measurement uses a
+          # child that exits immediately, and the census showed OpenConsole appearing at once rather
+          # than 2.9s in -- so the wait is not process creation. If it is a connect/handshake, this
+          # stalls too; if it is tied to the child EXITING, this is fast, and the 3s never touches the
+          # case the downstream consumer cares about, since terminal panes and dev servers are both long-lived.
+          Remove-Item $env:PORTAPTY_SUMMARY_FILE -ErrorAction SilentlyContinue
+          $env:PORTAPTY_SEQUENCE = '5'
+          foreach ($impl in @('inbox','oob')) {
+            if ($impl -eq 'oob') { $env:PORTAPTY_CONPTY = 'oob' }
+            else { $env:PORTAPTY_CONPTY = 'inbox' }   # explicit: unset now means "default", which is oob
+            dotnet test src/Porta.Pty.sln --configuration Release --no-build --filter "FullyQualifiedName~Sequential_LongLivedChild" 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Host "LONGLIVED conpty=$impl FAILED exit=$LASTEXITCODE" }
+          }
+          Get-Content $env:PORTAPTY_SUMMARY_FILE | ForEach-Object { Write-Host "SEQ $_" }
+
+      # Where does the ~3.0s go? Splits "launching OpenConsole.exe is slow" from "the handshake with
+      # it is slow", which are different problems with different fixes.
+      #
+      # If OpenConsole appears ~2.9s into each 3.0s spawn, the cost is in STARTING it -- Defender
+      # scanning an unsigned 1MB binary is the obvious suspect. If it appears immediately and then
+      # lingers for 3s, the cost is conpty.dll waiting on something it never gets.
+      #
+      # 10ms polling, so a 3s window has ~300 samples and the transition is unambiguous.
+      - name: Where the out-of-band 3 seconds goes (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Write-Host "--- Defender status ---"
+          try {
+            $mp = Get-MpComputerStatus -ErrorAction Stop
+            Write-Host "RealTimeProtectionEnabled=$($mp.RealTimeProtectionEnabled) AntivirusEnabled=$($mp.AntivirusEnabled)"
+          } catch { Write-Host "Get-MpComputerStatus unavailable: $($_.Exception.Message)" }
+
+          $env:PORTAPTY_CONPTY = 'oob'
+          $env:PORTAPTY_SEQUENCE = '3'
+          $env:PORTAPTY_SUMMARY_FILE = Join-Path $PWD "where.txt"
+          Remove-Item $env:PORTAPTY_SUMMARY_FILE -ErrorAction SilentlyContinue
+
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          $proc = Start-Process -FilePath dotnet -PassThru -NoNewWindow -RedirectStandardOutput where.log `
+            -ArgumentList @('test','src/Porta.Pty.sln','--configuration','Release','--no-build',
+                            '--filter','FullyQualifiedName~Sequential_ColdVersusWarm')
+          $last = -1
+          $events = New-Object System.Collections.Generic.List[string]
+          while (-not $proc.HasExited) {
+            $n = @(Get-Process OpenConsole -ErrorAction SilentlyContinue).Count
+            if ($n -ne $last) {
+              $events.Add(("{0,7:N0}ms OpenConsole={1}" -f $sw.Elapsed.TotalMilliseconds, $n))
+              $last = $n
+            }
+            Start-Sleep -Milliseconds 10
+          }
+          $proc.WaitForExit()
+          Write-Host "--- OpenConsole process timeline (test host started at 0ms) ---"
+          $events | ForEach-Object { Write-Host "TIMELINE $_" }
+          Get-Content $env:PORTAPTY_SUMMARY_FILE | ForEach-Object { Write-Host "WHERE $_" }
+
+      # Dump every byte the pseudoconsole emits, with arrival times, for both implementations.
+      #
+      # Hypothesis: ConPTY emits terminal QUERIES on startup -- Device Attributes, or a cursor position
+      # report -- and waits for the terminal to answer. This harness only READS and never writes back.
+      # A query that never gets a reply, abandoned after a fixed timeout, would be flat, once per
+      # pseudoconsole, independent of the child's work and lifetime: every property the stall has.
+      #
+      # Supporting evidence from outside: VS Code's terminal uses OpenConsole and shows no such stall,
+      # and VS Code has a real emulator that ANSWERS those queries.
+      - name: Dump early PTY output (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PORTAPTY_SUMMARY_FILE = Join-Path $PWD "dump.txt"
+          Remove-Item $env:PORTAPTY_SUMMARY_FILE -ErrorAction SilentlyContinue
+          foreach ($impl in @('inbox','oob')) {
+            if ($impl -eq 'oob') { $env:PORTAPTY_CONPTY = 'oob' }
+            else { $env:PORTAPTY_CONPTY = 'inbox' }   # explicit: unset now means "default", which is oob
+            dotnet test src/Porta.Pty.sln --configuration Release --no-build --filter "FullyQualifiedName~Diagnostic_DumpEarlyOutput" 2>&1 | Out-Null
+          }
+          Get-Content $env:PORTAPTY_SUMMARY_FILE | ForEach-Object { Write-Host "D $_" }
+
+          # And the guard that the LIBRARY answers it, with nothing in the test writing back.
+          Remove-Item $env:PORTAPTY_SUMMARY_FILE -ErrorAction SilentlyContinue
+          $env:PORTAPTY_SEQUENCE = '5'
+          foreach ($impl in @('inbox','oob')) {
+            if ($impl -eq 'oob') { $env:PORTAPTY_CONPTY = 'oob' }
+            else { $env:PORTAPTY_CONPTY = 'inbox' }   # explicit: unset now means "default", which is oob
+            dotnet test src/Porta.Pty.sln --configuration Release --no-build --filter "FullyQualifiedName~TheLibraryAnswersTheStartupHandshake" 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Host "D DA-REPLY conpty=$impl FAILED exit=$LASTEXITCODE" }
+          }
+          Get-Content $env:PORTAPTY_SUMMARY_FILE | ForEach-Object { Write-Host "D $_" }
+
+      # 96 concurrent spawns, Windows only, and only the two DedicatedThread tests -- so it exercises
+      # the CreateProcessW/AssignProcessToJobObject/ResumeThread path without paying for the six-test
+      # sweep at that count, which is what made the old 96 rungs most of a 5m19s job.
+      #
+      # This is the ONLY leg that covers the job-object race: below ~96 the child rarely finishes
+      # before it is assigned, so a green run at 24 and 48 says nothing about it.
+      - name: Job-object stress (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: bash
+        run: |
+          PORTAPTY_REPRO_SPAWNS=96 dotnet test src/Porta.Pty.sln \
+            --configuration Release --no-build \
+            -- --filter "FullyQualifiedName~DedicatedThreadReader" --timeout 3m
+
+      - name: Test
+        if: always()
+        run: dotnet test src/Porta.Pty.sln --configuration Release --no-build -- --timeout 3m
+
+      # continue-on-error above keeps the sweep from masking the ordinary suite's result; this
+      # puts its verdict back so a lost-output sample still turns the job red.
+      # COMMENTED OUT with the repro sweep above; it exists only to report that sweep's verdict.
+      # # shell: bash because this step used `>&2`, which pwsh parses as a redirect missing its file
+      # # spec -- so on Windows it failed with a ParserError instead of the message it was written to
+      # # print. It only ever ran on a red sweep, which is precisely when a confusing error is worst.
+      # - name: Fail if the repro sweep lost output
+      #   if: always() && steps.sweep.outputs.sweep_rc != '0'
+      #   shell: bash
+      #   run: |
+      #     echo "the repro sweep reported lost output -- see the 'Repro sweep' step" >&2
+      #     exit 1

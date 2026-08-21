@@ -77,6 +77,22 @@ namespace Porta.Pty.Unix
 
             // Try to kill the process, but don't throw if it already exited
             this.TryKill();
+
+            // ...and then CLOSE the controller fd, which nothing used to do.
+            //
+            // PtyStream wraps the fd with ownsHandle: false -- deliberately, because ReaderStream and
+            // WriterStream are two streams over the SAME fd and letting either own it would make
+            // disposing both a double close. The consequence was that disposing them closed neither,
+            // and pty_close, which exists in the shim and in both platforms' NativeMethods, had no
+            // callers anywhere in the library. Every pseudoterminal ever opened leaked its fd for the
+            // life of the process.
+            //
+            // It surfaces as pty_spawn failing with ENXIO ("no pty devices available") after enough
+            // terminals have come and gone -- which reads as a system limit rather than as a leak, and
+            // reads that way most convincingly in exactly the long-lived process that leaks the most.
+            // Found because moving this suite into a single MTP process ran four 24-spawn tests
+            // back to back and the third started failing; each test alone had always been fine.
+            this.TryClose();
         }
 
         /// <inheritdoc/>
@@ -125,6 +141,13 @@ namespace Porta.Pty.Unix
         protected abstract bool Kill(int controller);
 
         /// <summary>
+        /// OS-specific implementation of closing the pty controller fd.
+        /// </summary>
+        /// <param name="controller">The fd of the pty controller.</param>
+        /// <returns>True if the fd was closed, false otherwise.</returns>
+        protected abstract bool Close(int controller);
+
+        /// <summary>
         /// OS-specific implementation of waiting on the given process id.
         /// </summary>
         /// <param name="pid">The process id to wait on.</param>
@@ -144,6 +167,19 @@ namespace Porta.Pty.Unix
             catch
             {
                 // Ignore errors during cleanup - process may have already exited
+            }
+        }
+
+        /// <summary>Closes the controller fd without throwing; it may already be gone.</summary>
+        private void TryClose()
+        {
+            try
+            {
+                this.Close(this.controller);
+            }
+            catch
+            {
+                // Ignore errors during cleanup.
             }
         }
 
