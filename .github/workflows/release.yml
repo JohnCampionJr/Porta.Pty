@@ -143,13 +143,30 @@ jobs:
           exit $missing
 
       # Identity is applied HERE, not committed, for the same reason it is applied at pack time
-      # locally: the tree stays upstream-shaped so merges and PRs stay cheap. Keep these two
-      # properties in step with avalloy's build/dev-link.cs, which is the other place they exist.
+      # locally: the tree stays upstream-shaped so merges and PRs stay cheap. Keep these properties in
+      # step with avalloy's build/dev-link.cs, which is the other place they exist.
+      #
+      # BUILD and PACK are two steps, and must stay that way. Overriding AssemblyName changes the file
+      # the build produces, and this project has GeneratePackageOnBuild, so a one-shot `dotnet pack`
+      # packs DURING the build — before the rename has landed — and dies with
+      # NU5026 "the file Avalloy.PortaPty.dll to be packed was not found on disk". Building with
+      # packing suppressed and then packing --no-build makes the order explicit. dev-link learned this
+      # first; the first version of this workflow re-learned it.
+      - name: Build
+        run: |
+          dotnet build src/Porta.Pty/Porta.Pty.csproj \
+            --configuration Release \
+            -p:PackageId=${{ env.PACKAGE_ID }} \
+            -p:AssemblyName=${{ env.PACKAGE_ID }} \
+            -p:Version=${{ needs.setup.outputs.version }} \
+            -p:GeneratePackageOnBuild=false
+
       - name: Pack
         run: |
           dotnet pack src/Porta.Pty/Porta.Pty.csproj \
             --configuration Release \
             --output artifacts \
+            --no-build \
             -p:PackageId=${{ env.PACKAGE_ID }} \
             -p:AssemblyName=${{ env.PACKAGE_ID }} \
             -p:Version=${{ needs.setup.outputs.version }}
