@@ -1,0 +1,186 @@
+# Publishes this fork as Avalloy.PortaPty.
+#
+# Lives on `patches` and only ever runs there. That is not decoration: `main` is a pristine mirror of
+# upstream and every PR branch is cut from it, so a file that exists only here cannot reach a PR back
+# to upstream. It is also the only place the downstream package identity is allowed to appear.
+#
+# Why this exists at all: no single machine can build a complete package. The PTY shim is a C library
+# compiled per-platform, and the repo's ci.yml builds only the slice matching its own runner and then
+# throws it away. A developer packing on a Mac gets osx-arm64 and osx-x64 and NOTHING for Linux — and
+# because every <None Include> that packs a native is Condition="Exists(...)", that packs green. The
+# library degrades rather than throwing, so the result installs, restores, builds, and hangs twenty
+# seconds at the first spawn. This workflow is the only way to assemble all four.
+name: Release
+
+# Triggered by a TAG, not by workflow_dispatch. Dispatch requires the workflow to exist on the
+# repository's DEFAULT branch, and this one must never be there — the default is `main`, the pristine
+# upstream mirror that PR branches are cut from. A tag has no such requirement, and is a more
+# deliberate act than a button anyway.
+#
+#   git tag dryrun/1.0.8 && git push origin dryrun/1.0.8    # build, verify, upload — no push
+#   git tag release/1.0.8 && git push origin release/1.0.8  # the same, then publish
+on:
+  push:
+    tags:
+      - 'release/*'
+      - 'dryrun/*'
+
+permissions:
+  contents: read
+
+env:
+  PACKAGE_ID: Avalloy.PortaPty
+  FEED: https://nuget.cloudsmith.io/jcamp/packages/v3/index.json
+
+jobs:
+  setup:
+    name: check the tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: v
+        run: |
+          version="${GITHUB_REF_NAME#*/}"
+          [ -n "$version" ] || { echo "::error::tag '$GITHUB_REF_NAME' carries no version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publishing version $version (tag $GITHUB_REF_NAME)"
+
+      # The tag must sit on the maintained line. Tagging a commit on `main` would publish UPSTREAM's
+      # code under our package id, and nothing about the result would look wrong afterwards.
+      - name: Require the tag to be on patches
+        run: |
+          git fetch --quiet origin patches
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/patches; then
+            echo "::error::$GITHUB_SHA is not on patches — refusing to publish"; exit 1
+          fi
+          echo "tagged commit is on patches"
+
+  # One runner per RID, because the shim has to be COMPILED on its target platform. macOS is the
+  # exception: build.sh cross-compiles both arches there, which is why two RIDs come off one leg.
+  native:
+    name: shim (${{ matrix.rid }})
+    needs: setup
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true          # a partial set is the exact failure this workflow exists to prevent
+      matrix:
+        include:
+          - { os: ubuntu-latest,    rid: linux-x64 }
+          - { os: ubuntu-24.04-arm, rid: linux-arm64 }
+          - { os: macos-latest,     rid: osx-both }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cmake
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq cmake build-essential
+          else
+            brew list cmake >/dev/null 2>&1 || brew install cmake
+          fi
+
+      - name: Build the shim
+        run: |
+          cd src/Porta.Pty.Native
+          chmod +x build.sh
+          ./build.sh
+
+      # Fail here rather than at pack time. build.sh is `set -e`, but a silently empty output
+      # directory is the whole failure mode being guarded against, so it is asserted directly.
+      - name: Check something was produced
+        run: |
+          found=$(find src/Porta.Pty.Native/output/runtimes -name 'libporta_pty.*' | wc -l)
+          echo "built $found shim(s):"
+          find src/Porta.Pty.Native/output/runtimes -name 'libporta_pty.*'
+          [ "$found" -gt 0 ] || { echo "::error::no shim produced on ${{ matrix.rid }}"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shim-${{ matrix.rid }}
+          path: src/Porta.Pty.Native/output/runtimes/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: pack and push
+    needs: [setup, native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+
+      # Every leg's runtimes/ folder merges into one tree; the RIDs never collide.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shim-*
+          merge-multiple: true
+          path: src/Porta.Pty.Native/output/runtimes/
+
+      - name: Show what will be packed
+        run: find src/Porta.Pty.Native/output/runtimes -type f | sort
+
+      # The same check dev-link makes locally, made here where it can actually be satisfied. All four
+      # or nothing: a package missing one RID is indistinguishable from a working one until someone
+      # runs it on that platform.
+      - name: Require all four native slices
+        run: |
+          missing=0
+          for rid in linux-x64 linux-arm64 osx-x64 osx-arm64; do
+            if ls src/Porta.Pty.Native/output/runtimes/$rid/native/libporta_pty.* >/dev/null 2>&1; then
+              echo "  ok      $rid"
+            else
+              echo "::error::missing native for $rid"; missing=1
+            fi
+          done
+          exit $missing
+
+      # Identity is applied HERE, not committed, for the same reason it is applied at pack time
+      # locally: the tree stays upstream-shaped so merges and PRs stay cheap. Keep these two
+      # properties in step with avalloy's build/dev-link.cs, which is the other place they exist.
+      - name: Pack
+        run: |
+          dotnet pack src/Porta.Pty/Porta.Pty.csproj \
+            --configuration Release \
+            --output artifacts \
+            -p:PackageId=${{ env.PACKAGE_ID }} \
+            -p:AssemblyName=${{ env.PACKAGE_ID }} \
+            -p:Version=${{ needs.setup.outputs.version }}
+
+      # A nupkg is a zip. Assert on what actually landed in it, not on the pack exit code — pack
+      # succeeding while dropping every native is the precise bug this file exists for.
+      - name: Verify the package contents
+        run: |
+          pkg=artifacts/${{ env.PACKAGE_ID }}.${{ needs.setup.outputs.version }}.nupkg
+          [ -f "$pkg" ] || { echo "::error::$pkg not produced"; exit 1; }
+          echo "contents of $(basename "$pkg"):"
+          unzip -Z1 "$pkg" | sort | sed 's/^/  /'
+          missing=0
+          for rid in linux-x64 linux-arm64 osx-x64 osx-arm64; do
+            unzip -Z1 "$pkg" | grep -q "^runtimes/$rid/native/" \
+              || { echo "::error::packaged without runtimes/$rid"; missing=1; }
+          done
+          unzip -Z1 "$pkg" | grep -q "^lib/.*/${{ env.PACKAGE_ID }}.dll$" \
+            || { echo "::error::packaged assembly is not ${{ env.PACKAGE_ID }}.dll"; missing=1; }
+          exit $missing
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_ID }}.${{ needs.setup.outputs.version }}
+          path: artifacts/*.nupkg
+          if-no-files-found: error
+
+      - name: Push to Cloudsmith
+        if: startsWith(github.ref_name, 'release/')
+        run: |
+          dotnet nuget push "artifacts/${{ env.PACKAGE_ID }}.${{ needs.setup.outputs.version }}.nupkg" \
+            --source "${{ env.FEED }}" \
+            --api-key "${{ secrets.NUGET_API_KEY }}" \
+            --skip-duplicate
