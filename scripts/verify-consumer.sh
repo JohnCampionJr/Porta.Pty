@@ -45,10 +45,23 @@ fi
 echo ">> building samples/Porta.Pty.Demo against the packed library"
 demo="$repo/samples/Porta.Pty.Demo/Porta.Pty.Demo.csproj"
 out="$scratch/out"
+# Sources via a generated config rather than --source: on Windows the second --source reached NuGet as
+# a relative path instead of a URI (NU1301, resolved against the project directory), and --configfile
+# also stops any NuGet.config in the tree from contributing sources. Kept the same here so both
+# platforms restore identically.
+cat > "$scratch/nuget.config" <<XML
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="verify-local" value="$feed" />
+    <add key="nuget" value="https://api.nuget.org/v3/index.json" />
+  </packageSources>
+</configuration>
+XML
+
 dotnet restore "$demo" \
     -p:PortaPtyPackageVersion="$version" \
-    --source "$feed" \
-    --source "https://api.nuget.org/v3/index.json" \
+    --configfile "$scratch/nuget.config" \
     --packages "$scratch/packages" \
     -v q
 dotnet build "$demo" \

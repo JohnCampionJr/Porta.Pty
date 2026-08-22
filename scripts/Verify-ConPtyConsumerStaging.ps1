@@ -86,8 +86,24 @@ try {
     $demo = Join-Path $repo 'samples\Porta.Pty.Demo\Porta.Pty.Demo.csproj'
     $packages = Join-Path $scratch 'packages'
 
+    # Sources via a generated config, not --source. On Windows the second --source argument reached
+    # NuGet as a RELATIVE PATH rather than a URI, and it resolved it against the project directory:
+    #   NU1301: The local source '...\samples\Porta.Pty.Demo\https:\api.nuget.org\v3\index.json' doesn't exist.
+    # A config file has no such ambiguity, and --configfile also stops any NuGet.config in the tree from
+    # contributing sources, so the check restores from exactly these two.
+    $config = Join-Path $scratch 'nuget.config'
+    @"
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="verify-local" value="$feed" />
+    <add key="nuget" value="https://api.nuget.org/v3/index.json" />
+  </packageSources>
+</configuration>
+"@ | Set-Content $config
+
     & dotnet restore $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid `
-        --source $feed --source 'https://api.nuget.org/v3/index.json' --packages $packages -v q
+        --configfile $config --packages $packages -v q
     if ($LASTEXITCODE -ne 0) { throw "consumer restore failed" }
 
     & dotnet build $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid `
