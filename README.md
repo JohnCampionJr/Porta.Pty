@@ -180,3 +180,27 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+### Testing on Windows ARM64
+
+Run the test project directly for each architecture:
+
+```powershell
+dotnet test .\src\Porta.Pty.Tests\Porta.Pty.Tests.csproj --arch arm64
+dotnet test .\src\Porta.Pty.Tests\Porta.Pty.Tests.csproj --arch x64
+```
+
+Running the x64 suite under emulation requires the .NET 10 x64 runtime in
+addition to the native ARM64 runtime.
+
+### Native AOT smoke test
+
+Publish and run the AOT demo for the target Windows architecture:
+
+```powershell
+dotnet publish .\samples\Porta.Pty.AotDemo\Porta.Pty.AotDemo.csproj -c Release -r win-arm64
+.\samples\Porta.Pty.AotDemo\bin\Release\net10.0\win-arm64\publish\Porta.Pty.AotDemo.exe
+```
+
+Replace `win-arm64` with `win-x64` to test the x64 executable. The demo verifies
+that dynamic code is unavailable and completes a real PTY round trip.
