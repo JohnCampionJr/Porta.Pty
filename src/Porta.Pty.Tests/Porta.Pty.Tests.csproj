@@ -28,7 +28,11 @@
          and falls back to conhost, silently, which is how 32 samples of inbox vs inbox were
          mistaken for a ConPTY A/B result. It is also what makes
          DefaultDllImportSearchPaths(AssemblyDirectory) meaningful rather than inert.
-         Any consumer that wants the out-of-band path needs the same RID-specific output. -->
+         A CONSUMER of the package does not need this. The package stages each host next to its
+             own conpty.dll — including under runtimes/win-<arch>/native/ for a portable build — and the
+             library's import resolver looks there, so a project with no RuntimeIdentifier gets the
+             out-of-band path too. Verified by process census on Windows ARM64. This project pins a RID
+             only because it is a ProjectReference and so gets none of that packaging. -->
     <UseCurrentRuntimeIdentifier>true</UseCurrentRuntimeIdentifier>
 
     <OutputType>Exe</OutputType>

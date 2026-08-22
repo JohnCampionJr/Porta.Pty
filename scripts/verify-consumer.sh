@@ -75,8 +75,10 @@ echo ">> running the demo"
 # Again with NO RuntimeIdentifier. Porta.Pty must be consumable from a RID-independent project — a
 # library that forces every consumer to pin a RID is not a portable library — and on this platform that
 # claim is fully testable: the POSIX shim resolves through deps.json from runtimes/<rid>/native/ with no
-# flattening. (On Windows the equivalent question is whether conpty.dll finds its host beside itself in
-# that layout, which only a process census answers: scripts/Verify-ConPtyHost.ps1 -NoRid.)
+# flattening. (The Windows equivalent — whether conpty.dll finds its host beside itself in that layout —
+# was settled by process census on Windows ARM64: OpenConsole.exe in the tree by default, conhost.exe
+# with PORTAPTY_CONPTY=inbox as the control. scripts/Verify-ConPtyHost.ps1 -NoRid is that check, kept as
+# a regression guard since nothing in the ConPTY package documents the rule it relies on.)
 #
 # UseCurrentRuntimeIdentifier is turned off explicitly: the sample sets it so a plain `dotnet run` is
 # honest about what a consumer gets, and it would otherwise quietly reintroduce a RID here.

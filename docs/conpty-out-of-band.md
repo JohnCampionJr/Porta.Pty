@@ -317,6 +317,11 @@ details in there are load-bearing:
   `$(OutDir)%(DestinationSubDirectory)%(Filename)%(Extension)` and never reads `TargetPath`. With
   `TargetPath` both hosts copy flat and the second overwrites the first: a `win-x64` consumer ended up
   with a single `OpenConsole.exe` at the output root, and it was the **ARM64** one.
+* **The destination is derived from the DLL's own `DestinationSubDirectory`**, which is what keeps the
+  library usable from a RID-independent project. A portable build cannot flatten native assets, so its
+  `conpty.dll` stays under `runtimes/win-<arch>/native/` and the host has to follow it there. Assuming the
+  flattened layout would have made a `RuntimeIdentifier` mandatory for every consumer — not a reasonable
+  thing for a library to require, and it was briefly the case here.
 
 Setting `ConptyRequiresx64Host` / `ConptyRequiresARM64Host` from a shipped `.props` cannot fix this — the
 targets that read those flags are precisely the ones that never import.

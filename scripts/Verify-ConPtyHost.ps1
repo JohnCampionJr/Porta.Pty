@@ -23,11 +23,14 @@
     Build the consumer with NO RuntimeIdentifier — the portable layout, where native assets stay under
     runtimes/win-<arch>/native/ instead of being flattened into the app root.
 
-    This is the question that decides whether Porta.Pty can be consumed by a RID-independent project and
-    still get out-of-band ConPTY. The library's resolver finds conpty.dll there, and the package stages
-    OpenConsole.exe beside it — but whether conpty.dll LOOKS beside itself for its host is undocumented,
-    and only the process census answers it. OpenConsole.exe in the tree means portable works; conhost.exe
-    means the host must be found some other way.
+    This decides whether Porta.Pty can be consumed by a RID-independent project and still get out-of-band
+    ConPTY. The library's resolver finds conpty.dll there and the package stages OpenConsole.exe beside
+    it, but whether conpty.dll LOOKS beside itself for its host is documented nowhere in the ConPTY
+    package — only a process census answers it.
+
+    Answered on Windows ARM64: it does. OpenConsole.exe in the tree with the default, conhost.exe with
+    -Mode inbox as the control. Kept as a regression guard precisely because the rule it depends on is
+    undocumented and could change under us.
 
 .PARAMETER Mode
     auto  - the library's default (out-of-band, falling back to in-box if conpty.dll is absent)
