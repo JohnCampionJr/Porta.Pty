@@ -1,48 +1,78 @@
-// Copyright (c) Microsoft Corporation. All rights reserved.
+﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 namespace Porta.Pty.Windows
 {
     using System;
-    using Vanara.PInvoke;
-    using static Vanara.PInvoke.Kernel32;
+    using System.ComponentModel;
+    using System.Runtime.InteropServices;
+    using System.Runtime.Versioning;
+    using Microsoft.Win32.SafeHandles;
+    // global:: is required, not stylistic. This namespace is Porta.Pty.WINDOWS, so an unqualified
+    // `using Windows.Win32` binds relative to it and looks for Porta.Pty.Windows.Windows.Win32.
+    // The alternative is moving the usings outside the namespace block, which is what Sylinko's fork
+    // does by using file-scoped namespaces; keeping them inside preserves this file's upstream shape.
+    using global::Windows.Win32;
+    using global::Windows.Win32.Foundation;
+    using global::Windows.Win32.System.JobObjects;
 
     /// <summary>
     /// Provides Job Object functionality to ensure child processes are terminated
     /// when the parent process exits, preventing zombie ConPTY sessions.
     /// </summary>
+    /// <remarks>
+    /// Windows-only, and specifically Windows 10 1809 or later: ConPTY does not exist before that, and
+    /// <see cref="NativeMethods.IsPseudoConsoleSupported"/> is the runtime gate that says so with a
+    /// PlatformNotSupportedException naming the version.
+    ///
+    /// The VERSION in the annotation is not decoration. CsWin32's generated entry points carry their
+    /// own floors (windows5.1.2600 for the job-object calls, windows6.0.6000 for the attribute-list
+    /// ones), and a bare "windows" annotation does not satisfy them -- the platform-compatibility
+    /// analyzer reported 22 warnings saying exactly that. Stating the real minimum satisfies all of
+    /// them truthfully, where suppressing would have hidden a genuine question about which Windows
+    /// versions this library supports.
+    /// </remarks>
+    [SupportedOSPlatform("windows10.0.17763")]
     internal static class JobObject
     {
         /// <summary>
         /// Creates a Job Object configured to kill all assigned processes when the job handle is closed.
         /// This ensures that if the terminal process crashes or exits unexpectedly, all child processes
-        /// (including conhost.exe and any PTY-backed console apps) are automatically terminated.
+        /// (including the console host and any PTY-backed console apps) are automatically terminated.
         /// </summary>
         /// <returns>A safe handle to the created job object.</returns>
-        public static SafeHJOB Create()
+        public static unsafe SafeFileHandle Create()
         {
-            // Create an anonymous job object
-            SafeHJOB jobHandle = CreateJobObject(null, null);
+            // Anonymous: no name, so nothing else can open it by name.
+            SafeFileHandle jobHandle = PInvoke.CreateJobObject(null, (string?)null);
             if (jobHandle.IsInvalid)
             {
-                throw new InvalidOperationException(
-                    "Failed to create job object",
-                    new System.ComponentModel.Win32Exception());
+                throw new InvalidOperationException("Failed to create job object", new Win32Exception());
             }
 
             try
             {
-                // Configure the job to kill all processes when the job handle is closed
                 var extendedInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
                 {
                     BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
                     {
-                        LimitFlags = JOBOBJECT_LIMIT_FLAGS.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-                    }
+                        LimitFlags = JOB_OBJECT_LIMIT.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                    },
                 };
 
-                // Vanara's SetInformationJobObject throws Win32Exception on failure
-                SetInformationJobObject(jobHandle, JOBOBJECTINFOCLASS.JobObjectExtendedLimitInformation, extendedInfo);
+                // Vanara's wrapper threw on failure; CsWin32's returns BOOL, so the check is now ours
+                // to make. Dropping it would be worse than it sounds: the job would exist but not kill
+                // on close, and every crashed terminal would strand its console host.
+                if (!PInvoke.SetInformationJobObject(
+                        jobHandle,
+                        JOBOBJECTINFOCLASS.JobObjectExtendedLimitInformation,
+                        &extendedInfo,
+                        (uint)Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()))
+                {
+                    throw new InvalidOperationException(
+                        "Failed to configure the job object to kill its processes on close",
+                        new Win32Exception());
+                }
 
                 return jobHandle;
             }
@@ -58,7 +88,7 @@ namespace Porta.Pty.Windows
         /// </summary>
         /// <param name="jobHandle">The job object handle.</param>
         /// <param name="processHandle">The process handle to assign.</param>
-        public static void AssignProcess(SafeHJOB jobHandle, IntPtr processHandle)
+        public static void AssignProcess(SafeFileHandle jobHandle, IntPtr processHandle)
         {
             if (jobHandle == null || jobHandle.IsInvalid || jobHandle.IsClosed)
             {
@@ -70,11 +100,11 @@ namespace Porta.Pty.Windows
                 throw new ArgumentException("Invalid process handle", nameof(processHandle));
             }
 
-            if (!AssignProcessToJobObject(jobHandle, processHandle))
+            if (!PInvoke.AssignProcessToJobObject((HANDLE)jobHandle.DangerousGetHandle(), (HANDLE)processHandle))
             {
                 throw new InvalidOperationException(
                     "Failed to assign process to job object",
-                    new System.ComponentModel.Win32Exception());
+                    new Win32Exception());
             }
         }
     }

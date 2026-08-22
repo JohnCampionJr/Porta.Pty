@@ -11,8 +11,8 @@ namespace Porta.Pty.Tests
     using System.Text;
     using System.Threading;
     using System.Threading.Tasks;
-    using Xunit;
 
+    [TestClass]
     public class PtyTests
     {
         private static readonly int TestTimeoutMs = Debugger.IsAttached ? 300_000 : 10_000;
@@ -62,7 +62,7 @@ namespace Porta.Pty.Tests
             };
         }
 
-        [Fact]
+        [TestMethod]
         public async Task EchoTest_ReturnsExpectedOutput()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
@@ -74,13 +74,13 @@ namespace Porta.Pty.Tests
             // Read output until we find expected text or timeout
             string output = await ReadOutputAsync(terminal, "test", TimeSpan.FromSeconds(5));
 
-            Assert.Contains("test", output);
+            output.Should().Contain("test");
             
             // Command completes naturally, just wait for exit - no Kill() needed
             terminal.WaitForExit(1000);
         }
 
-        [Fact]
+        [TestMethod]
         public async Task SpawnAsync_ReturnsPidGreaterThanZero()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
@@ -89,13 +89,13 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            Assert.True(terminal.Pid > 0, "Process ID should be greater than zero");
+            terminal.Pid.Should().BePositive("a spawned process must report a real pid");
             
             // Command completes naturally
             terminal.WaitForExit(1000);
         }
 
-        [Fact]
+        [TestMethod]
         public async Task ProcessExited_EventIsFired()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
@@ -115,16 +115,16 @@ namespace Porta.Pty.Tests
                 try
                 {
                     int exitCode = await exitedTcs.Task;
-                    Assert.True(exitCode >= 0, $"Exit code should be non-negative, was {exitCode}");
+                    exitCode.Should().BeGreaterThanOrEqualTo(0, "exit code was {0}", exitCode);
                 }
                 catch (TaskCanceledException)
                 {
-                    Assert.True(terminal.WaitForExit(1000), "Process should have exited");
+                    terminal.WaitForExit(1000).Should().BeTrue("the process should have exited");
                 }
             }
         }
 
-        [Fact]
+        [TestMethod]
         public async Task Resize_DoesNotThrow()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
@@ -133,16 +133,14 @@ namespace Porta.Pty.Tests
 
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
 
-            var exception = Record.Exception(() => terminal.Resize(120, 40));
-            Assert.Null(exception);
-
-            exception = Record.Exception(() => terminal.Resize(40, 10));
-            Assert.Null(exception);
+            FluentActions.Invoking(() => terminal.Resize(120, 40)).Should().NotThrow();
+            FluentActions.Invoking(() => terminal.Resize(40, 10)).Should().NotThrow();
 
             terminal.WaitForExit(1000);
         }
 
-        [Fact(Skip = "Not reliable on CI server")]
+        [TestMethod]
+        [Ignore("Not reliable on CI server")]
         public async Task Kill_TerminatesProcess()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
@@ -153,15 +151,14 @@ namespace Porta.Pty.Tests
 
             await Task.Delay(500, cts.Token);
 
-            Assert.False(terminal.WaitForExit(100), "Process should still be running");
+            terminal.WaitForExit(100).Should().BeFalse("the process should still be running");
 
             terminal.Kill();
 
-            bool exited = terminal.WaitForExit(5000);
-            Assert.True(exited, "Process should exit after being killed");
+            terminal.WaitForExit(5000).Should().BeTrue("the process should exit after being killed");
         }
 
-        [Fact]
+        [TestMethod]
         public async Task WaitForExit_ReturnsFalseWhileProcessIsRunning()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
@@ -172,14 +169,14 @@ namespace Porta.Pty.Tests
 
             await Task.Delay(500, cts.Token);
 
-            Assert.False(terminal.WaitForExit(100), "WaitForExit should return false while process is running");
+            terminal.WaitForExit(100).Should().BeFalse("WaitForExit must be false while the process runs");
             
             // Interactive shell - Kill is appropriate here since it won't exit on its own
             terminal.Kill();
             terminal.WaitForExit(1000);
         }
 
-        [Fact]
+        [TestMethod]
         public async Task EnvironmentVariables_ArePassedToProcess()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
@@ -209,12 +206,13 @@ namespace Porta.Pty.Tests
 
             string output = await ReadOutputAsync(terminal, "custom_value_12345", TimeSpan.FromSeconds(5));
 
-            Assert.Contains("custom_value_12345", output);
+            output.Should().Contain("custom_value_12345");
             
             terminal.WaitForExit(1000);
         }
 
-        [Fact(Skip = "Not reliable on CI server")]
+        [TestMethod]
+        [Ignore("Not reliable on CI server")]
         public async Task WorkingDirectory_IsRespected()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
@@ -227,13 +225,15 @@ namespace Porta.Pty.Tests
 
             string output = await ReadOutputAsync(terminal, IsWindows ? "\\" : "/", TimeSpan.FromSeconds(5));
 
-            Assert.True(output.Contains(Path.DirectorySeparatorChar), 
-                $"Output should contain path separator. Actual output: '{output}'");
+            output.Should().Contain(
+                Path.DirectorySeparatorChar.ToString(),
+                "the output should carry a path separator, but was '{0}'",
+                output);
                 
             terminal.WaitForExit(1000);
         }
 
-        [Fact]
+        [TestMethod]
         public async Task SpawnAsync_ThrowsOnEmptyApp()
         {
             var options = new PtyOptions
@@ -244,11 +244,12 @@ namespace Porta.Pty.Tests
                 Environment = new Dictionary<string, string>()
             };
 
-            await Assert.ThrowsAsync<ArgumentNullException>(() =>
-                PtyProvider.SpawnAsync(options, CancellationToken.None));
+            await FluentActions.Awaiting(() =>
+                PtyProvider.SpawnAsync(options, CancellationToken.None))
+                .Should().ThrowAsync<ArgumentNullException>();
         }
 
-        [Fact]
+        [TestMethod]
         public async Task SpawnAsync_ThrowsOnEmptyCwd()
         {
             var options = new PtyOptions
@@ -259,11 +260,12 @@ namespace Porta.Pty.Tests
                 Environment = new Dictionary<string, string>()
             };
 
-            await Assert.ThrowsAsync<ArgumentNullException>(() =>
-                PtyProvider.SpawnAsync(options, CancellationToken.None));
+            await FluentActions.Awaiting(() =>
+                PtyProvider.SpawnAsync(options, CancellationToken.None))
+                .Should().ThrowAsync<ArgumentNullException>();
         }
 
-        [Fact]
+        [TestMethod]
         public async Task SpawnAsync_ThrowsOnNullCommandLine()
         {
             var options = new PtyOptions
@@ -274,11 +276,12 @@ namespace Porta.Pty.Tests
                 Environment = new Dictionary<string, string>()
             };
 
-            await Assert.ThrowsAsync<ArgumentNullException>(() =>
-                PtyProvider.SpawnAsync(options, CancellationToken.None));
+            await FluentActions.Awaiting(() =>
+                PtyProvider.SpawnAsync(options, CancellationToken.None))
+                .Should().ThrowAsync<ArgumentNullException>();
         }
 
-        [Fact]
+        [TestMethod]
         public async Task SpawnAsync_ThrowsOnNullEnvironment()
         {
             var options = new PtyOptions
@@ -289,11 +292,13 @@ namespace Porta.Pty.Tests
                 Environment = null!
             };
 
-            await Assert.ThrowsAsync<ArgumentNullException>(() =>
-                PtyProvider.SpawnAsync(options, CancellationToken.None));
+            await FluentActions.Awaiting(() =>
+                PtyProvider.SpawnAsync(options, CancellationToken.None))
+                .Should().ThrowAsync<ArgumentNullException>();
         }
 
-        [Fact(Skip ="Not reliable on CI server")]
+        [TestMethod]
+        [Ignore("Not reliable on CI server")]
         public async Task ExitCode_IsAvailableAfterProcessExits()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
@@ -304,10 +309,10 @@ namespace Porta.Pty.Tests
 
             await ReadOutputAsync(terminal, "success", TimeSpan.FromSeconds(10));
 
-            Assert.True(terminal.WaitForExit(5000), "Process should exit");
+            terminal.WaitForExit(5000).Should().BeTrue("the process should exit");
 
             int exitCode = terminal.ExitCode;
-            Assert.True(exitCode >= 0, $"Exit code should be non-negative, was {exitCode}");
+            exitCode.Should().BeGreaterThanOrEqualTo(0, "exit code was {0}", exitCode);
         }
 
         /// <summary>

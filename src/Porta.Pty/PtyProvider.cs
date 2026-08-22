@@ -19,6 +19,53 @@ namespace Porta.Pty
         private static readonly TraceSource Trace = new TraceSource(nameof(PtyProvider));
 
         /// <summary>
+        /// Gets the pseudoconsole implementation this process will use, for diagnostics and logging.
+        ///
+        /// <para>Worth exposing because the choice is no longer a simple reading of the environment:
+        /// on Windows the default is out-of-band with an automatic fallback to in-box when conpty.dll
+        /// is absent, so <c>PORTAPTY_CONPTY</c> does not tell you what is actually in play. Anything
+        /// reporting the implementation from the environment variable will be wrong exactly when the
+        /// fallback fires.</para>
+        ///
+        /// <para>Values: <c>posix</c>, <c>inbox</c>, <c>oob</c>, and <c>oob-no-host</c>. The last one
+        /// is the interesting one — <c>conpty.dll</c> was selected and loaded, but its
+        /// <c>OpenConsole.exe</c> is not there, so it will fall back to conhost without saying so. It
+        /// is reported separately rather than as <c>oob</c> because a diagnostic that cannot tell those
+        /// two apart is worse than none: it makes an A/B of out-of-band against in-box come out even,
+        /// both arms being conhost.</para>
+        ///
+        /// <para>Necessary, not sufficient: <c>oob</c> means the host is where the loader will look,
+        /// not that it was launched. <c>scripts/Verify-ConPtyHost.ps1</c> settles that from the process
+        /// tree.</para>
+        /// </summary>
+        public static string PseudoConsoleImplementation
+        {
+            get
+            {
+                if (!OperatingSystem.IsWindows())
+                {
+                    return "posix";
+                }
+
+                // Same suppression and same reason as PlatformServices: the Windows types declare a
+                // version floor that OperatingSystem.IsWindows() alone cannot assert, and reading a
+                // static bool is harmless on any Windows.
+#pragma warning disable CA1416
+                if (!Windows.PseudoConsole.UseOutOfBand)
+                {
+                    return "inbox";
+                }
+
+                // "oob" is a claim about what will RUN, so it is not made on the strength of having
+                // selected conpty.dll. conpty.dll with no OpenConsole.exe beside it falls back to
+                // conhost without erroring, and reporting that as "oob" is the false A/B this library's
+                // own measurements had to be protected from: both arms conhost, numbers in agreement.
+                return Windows.PseudoConsole.OutOfBandHostPresent ? "oob" : "oob-no-host";
+#pragma warning restore CA1416
+            }
+        }
+
+        /// <summary>
         /// Spawn a new process connected to a pseudoterminal.
         /// </summary>
         /// <param name="options">The set of options for creating the pseudoterminal.</param>
@@ -63,7 +110,17 @@ namespace Porta.Pty
                 environment = new Dictionary<string, string>(PlatformServices.EnvironmentVariableComparer);
                 foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
                 {
-                    environment[entry.Key.ToString()] = entry.Value.ToString();
+                    // DictionaryEntry is the pre-generics shape: Key is object and Value is object?,
+                    // so both ToString() calls were unguarded. In practice the environment yields
+                    // neither a null key nor a null value, which is exactly why this would have
+                    // surfaced as a NullReferenceException from inside a foreach on a good day and
+                    // never on a bad one.
+                    if (entry.Key.ToString() is not { } key)
+                    {
+                        continue;
+                    }
+
+                    environment[key] = entry.Value?.ToString() ?? string.Empty;
                 }
             }
 

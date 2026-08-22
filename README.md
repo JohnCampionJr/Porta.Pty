@@ -15,7 +15,10 @@ A cross-platform pseudoterminal (PTY) library for .NET that enables spawning and
 - **Full PTY Control**: Read/write streams, resize terminal, handle process exit events
 - **Unicode Support**: Full UTF-8 support including complex characters
 - **Native PTY Shim**: Includes a native C library to avoid .NET runtime permissioning issues with `fork()` on Linux/macOS
-- **.NET Standard 2.0**: Compatible with .NET Core 2.0+, .NET 5+, and .NET Framework 4.6.1+
+- **Out-of-band ConPTY**: On Windows, uses the `conpty.dll` + `OpenConsole.exe` implementation Windows
+  Terminal ships, falling back to the in-box console host when it is unavailable
+- **Native AOT**: Interop is source-generated, so the library works in a `PublishAot` application
+- **.NET 10**: As of 2.0.0. Earlier versions targeted .NET Standard 2.0; see below
 
 ## Installation
 
@@ -30,6 +33,20 @@ Or via the Package Manager Console in Visual Studio:
 ```powershell
 Install-Package Porta.Pty
 ```
+
+### Upgrading to 2.0
+
+**2.0.0 targets `net10.0`.** Earlier versions targeted .NET Standard 2.0 so one package could also serve
+.NET Framework; that reach is gone, and it is the reason for the major bump rather than anything in the
+API, which is unchanged.
+
+The trade: netstandard2.0 pins C# 8 and puts most modern interop behind a polyfill or out of reach, and —
+the part that mattered in this codebase — it meant the library was never *compiled* against the runtime
+its consumers run on, in a repo whose POSIX shim exists precisely because a runtime version changed
+behaviour underneath it (.NET 7 enabling W^X by default).
+
+Nothing else is required of a consumer: no properties, no extra package references, and no
+`RuntimeIdentifier`.
 
 ## Usage
 
@@ -144,6 +161,8 @@ flowchart TB
 - Leverages `CreatePseudoConsole`, `ResizePseudoConsole`, and `ClosePseudoConsole` native functions
 - Process isolation via Windows Job Objects for clean process termination
 - Implements proper cleanup order per Microsoft documentation
+- Prefers the **out-of-band** ConPTY (`conpty.dll` + `OpenConsole.exe`) over the in-box one, and falls
+  back rather than failing when it is absent — see [docs/conpty-out-of-band.md](docs/conpty-out-of-band.md)
 
 #### Linux & macOS
 - Uses **POSIX PTY** functions (`forkpty`, `openpty`) via a native C shim library
@@ -170,8 +189,14 @@ By delegating the fork+exec to native C code, Porta.Pty avoids running any manag
 
 ### Dependencies
 
-- **Vanara.PInvoke.Kernel32**: Windows API P/Invoke bindings
-- **Mono.Posix.NETStandard**: POSIX API bindings for Unix platforms
+- **Microsoft.Windows.CsWin32**: source-generates the Win32 P/Invoke. A build-time analyzer with
+  `PrivateAssets="all"`, so it contributes nothing at run time and nothing to a consumer's graph — this
+  replaced **Vanara.PInvoke.Kernel32**, which shipped a runtime assembly every consumer carried for about
+  twenty entry points
+- **Microsoft.Windows.Console.ConPTY**: `conpty.dll` and `OpenConsole.exe`, the out-of-band console host
+
+Unix needs no managed interop package: the POSIX work happens in the native shim, so
+**Mono.Posix.NETStandard** is gone too.
 
 ## License
 
@@ -180,3 +205,27 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+### Testing on Windows ARM64
+
+Run the test project directly for each architecture:
+
+```powershell
+dotnet test .\src\Porta.Pty.Tests\Porta.Pty.Tests.csproj --arch arm64
+dotnet test .\src\Porta.Pty.Tests\Porta.Pty.Tests.csproj --arch x64
+```
+
+Running the x64 suite under emulation requires the .NET 10 x64 runtime in
+addition to the native ARM64 runtime.
+
+### Native AOT smoke test
+
+Publish and run the AOT demo for the target Windows architecture:
+
+```powershell
+dotnet publish .\samples\Porta.Pty.AotDemo\Porta.Pty.AotDemo.csproj -c Release -r win-arm64
+.\samples\Porta.Pty.AotDemo\bin\Release\net10.0\win-arm64\publish\Porta.Pty.AotDemo.exe
+```
+
+Replace `win-arm64` with `win-x64` to test the x64 executable. The demo verifies
+that dynamic code is unavailable and completes a real PTY round trip.
