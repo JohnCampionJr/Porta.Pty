@@ -38,15 +38,24 @@
 
   <PropertyGroup>
     <!-- Stage the OpenConsole.exe hosts that conpty.dll launches, for the out-of-band ConPTY path.
-         These live HERE rather than in the library, because the library needs no package at all to
-         support that path: the in-box arm is CsWin32-generated and the out-of-band arm is a
-         hand-written DllImport to conpty.dll. The package only SHIPS the native files, so it belongs
-         with whoever opts in rather than riding along in every consumer's dependency graph.
 
-         Without these flags the package copies conpty.dll and nothing else, and the out-of-band path
-         silently runs on conhost instead. The package derives ConptyNativePlatform from PlatformTarget,
-         which for a managed project is AnyCPU and matches none of its branches; setting the two flags
-         directly works because they are read by its .targets, which imports after this file. -->
+         A CONSUMER of the Porta.Pty package needs none of this. The library carries the ConPTY
+         reference and ships buildTransitive/Porta.Pty.targets, which stages the hosts on the consumer's
+         side; samples/Porta.Pty.Demo sets no Conpty* property and no ConPTY PackageReference, and gets
+         conpty.dll plus both hosts. The only requirement on a consumer is a RID-specific build, since
+         that is what flattens native assets into the app root where the imports look.
+
+         This project needs it because it references the library by PROJECT. Package build assets —
+         build/ and buildTransitive/ alike — are a NuGet mechanism and do not apply across a
+         ProjectReference, and MSBuild properties do not flow across one either. So the test project has
+         to arrange its own out-of-band staging, with its own direct ConPTY reference below.
+
+         That is the same gap that let the consumer bug hide: a ProjectReference cannot exercise any of
+         the packaging, which is why samples/Porta.Pty.Demo exists and is built from a real .nupkg.
+
+         The flags are needed because the package derives ConptyNativePlatform from PlatformTarget,
+         which for a managed project is AnyCPU and matches none of its branches; setting them directly
+         works because they are read by its .targets, which imports after this file. -->
     <ConptyRequiresx64Host>true</ConptyRequiresx64Host>
     <ConptyRequiresARM64Host>true</ConptyRequiresARM64Host>
   </PropertyGroup>
