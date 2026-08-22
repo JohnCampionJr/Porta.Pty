@@ -1,4 +1,4 @@
-/*
+﻿/*
  * porta_pty.c - Native PTY shim for Porta.Pty
  * 
  * This native library wraps forkpty() + execvp() to avoid W^X (Write XOR Execute)
@@ -22,6 +22,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <pthread.h>
 #include <termios.h>
 #include <sys/wait.h>
 #include <signal.h>
@@ -84,6 +85,33 @@ typedef struct {
  * Returns:
  *   pty_spawn_result_t with master_fd and pid on success, or pid=-1 and error set on failure
  */
+/*
+ * Serialises pty allocation.
+ *
+ * Darwin's forkpty() -> openpty() -> grantpt()/unlockpt() path is NOT thread safe. Called
+ * concurrently it fails outright, and often: a pure-C harness with 24 threads calling pty_spawn at
+ * once failed 5 of 24 on three consecutive runs, and 0 of 24 on three consecutive runs with nothing
+ * changed but this lock. No .NET involved in either.
+ *
+ * The failure is nasty to diagnose because it does not report a usable errno. forkpty returns -1 and
+ * leaves errno at -6 -- NEGATIVE, so it is not an errno at all but a kernel-style -ENXIO leaking out
+ * of the pty allocator. Anything that prints strerror(errno) says "Undefined error: 0", and anything
+ * that reads it as a POSIX errno concludes something false. It is also easy to misread as fd
+ * exhaustion: measured during a failing run, the process held 30 open descriptors against a limit of
+ * 1048576, and the system had 31 of 511 ptys in use. Nothing was exhausted.
+ *
+ * This is not a test-only concern: opening several terminals at once on macOS failed about one
+ * time in five.
+ *
+ * The lock is held across fork(), which is safe HERE for the narrow reason that the child never
+ * touches it: on every path the child either execvp()s or _exit()s, so its copy of the mutex dies
+ * with it. Only the parent unlocks, hence the pid != 0 test.
+ *
+ * Linux's glibc openpty does not appear to need this, and the lock costs microseconds on a path that
+ * is already forking a process, so it is applied unconditionally rather than ifdef'd per platform.
+ */
+static pthread_mutex_t pty_spawn_lock = PTHREAD_MUTEX_INITIALIZER;
+
 PTY_EXPORT pty_spawn_result_t pty_spawn(
     const char* file,
     char* const argv[],
@@ -130,11 +158,17 @@ PTY_EXPORT pty_spawn_result_t pty_spawn(
     
     /* Fork with PTY */
     int master_fd = -1;
+    pthread_mutex_lock(&pty_spawn_lock);
     pid_t pid = forkpty(&master_fd, NULL, term_ptr, ws_ptr);
+    int spawn_errno = errno;
+    if (pid != 0) {
+        /* Parent, or forkpty failed. The child must not unlock a mutex it only has a copy of. */
+        pthread_mutex_unlock(&pty_spawn_lock);
+    }
     
     if (pid == -1) {
         /* forkpty failed */
-        result.error = errno;
+        result.error = spawn_errno;
         return result;
     }
     
