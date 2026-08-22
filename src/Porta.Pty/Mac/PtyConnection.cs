@@ -44,6 +44,12 @@ namespace Porta.Pty.Mac
         }
 
         /// <inheritdoc/>
+        protected override bool Close(int controller)
+        {
+            return pty_close(controller) != -1;
+        }
+
+        /// <inheritdoc/>
         protected override bool WaitPid(int pid, ref int status)
         {
             // Use blocking waitpid - the background thread will wait for the process to exit
