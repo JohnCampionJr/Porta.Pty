@@ -70,7 +70,12 @@ try {
     New-Item -ItemType Directory -Force -Path $feed, $consumer | Out-Null
 
     Write-Host "`n>> packing Porta.Pty $Version" -ForegroundColor Cyan
-    & dotnet pack (Join-Path $repo 'src\Porta.Pty\Porta.Pty.csproj') -c Release -o $feed -p:Version=$Version --nologo -v q
+    # GeneratePackageOnBuild=false is required: the library sets it true, and with it set the Pack
+    # target does not depend on Build, so pack takes whatever is already in bin/Release. CI builds
+    # Debug, so that is empty and pack dies with NU5026 naming Porta.Pty.dll. Passes locally after
+    # any Release build, which is what makes it a CI-only failure.
+    & dotnet pack (Join-Path $repo 'src\Porta.Pty\Porta.Pty.csproj') -c Release -o $feed `
+        -p:Version=$Version -p:GeneratePackageOnBuild=false --nologo -v q
     if ($LASTEXITCODE -ne 0) { throw "pack failed" }
 
     # samples/Porta.Pty.Demo, the same consumer Linux and macOS run through scripts/verify-consumer.sh.
@@ -85,7 +90,7 @@ try {
         --source $feed --source 'https://api.nuget.org/v3/index.json' --packages $packages -v q
     if ($LASTEXITCODE -ne 0) { throw "consumer restore failed" }
 
-    & dotnet build $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid ``
+    & dotnet build $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid `
         --packages $packages --no-restore -c Release -o (Join-Path $consumer 'out') --nologo -v q
     if ($LASTEXITCODE -ne 0) { throw "consumer build failed" }
     Write-Host "  build output:" -ForegroundColor Cyan
@@ -93,7 +98,7 @@ try {
 
     # Publish separately: it is a different item pipeline (CopyToPublishDirectory), so passing on
     # build says nothing about it.
-    & dotnet publish $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid ``
+    & dotnet publish $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid `
         --packages $packages --no-restore -c Release -o (Join-Path $consumer 'pub') --nologo -v q
     if ($LASTEXITCODE -ne 0) { throw "consumer publish failed" }
     Write-Host "  publish output:" -ForegroundColor Cyan

@@ -17,8 +17,14 @@ trap 'rm -rf "$scratch"' EXIT
 feed="$scratch/feed"
 mkdir -p "$feed"
 
+# GeneratePackageOnBuild=false is required, not tidiness. The library sets it to true, and with it set
+# the Pack target does NOT depend on Build (otherwise packing would recurse). `dotnet pack -c Release`
+# then packs whatever is already in bin/Release -- and CI builds Debug, so there is nothing there:
+#   NU5026: The file '.../bin/Release/net10.0/Porta.Pty.dll' to be packed was not found on disk.
+# It passes locally after any Release build, which is exactly what makes it a CI-only failure.
 echo ">> packing Porta.Pty $version"
-dotnet pack "$repo/src/Porta.Pty/Porta.Pty.csproj" -c Release -o "$feed" -p:Version="$version" --nologo -v q
+dotnet pack "$repo/src/Porta.Pty/Porta.Pty.csproj" -c Release -o "$feed" \
+    -p:Version="$version" -p:GeneratePackageOnBuild=false --nologo -v q
 
 # The shim has to be IN the package. It is packed with Condition="Exists(...)", so a tree where
 # src/Porta.Pty.Native/build.sh has not run produces a package that is silently missing its native and

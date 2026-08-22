@@ -69,7 +69,12 @@ try {
     New-Item -ItemType Directory -Force -Path $feed, $consumer | Out-Null
 
     Write-Host "`n>> packing Porta.Pty $Version" -ForegroundColor Cyan
-    & dotnet pack (Join-Path $repo 'src\Porta.Pty\Porta.Pty.csproj') -c Release -o $feed -p:Version=$Version --nologo -v q
+    # GeneratePackageOnBuild=false is required: the library sets it true, and with it set the Pack
+    # target does not depend on Build, so pack takes whatever is already in bin/Release. CI builds
+    # Debug, so that is empty and pack dies with NU5026 naming Porta.Pty.dll. Passes locally after
+    # any Release build, which is what makes it a CI-only failure.
+    & dotnet pack (Join-Path $repo 'src\Porta.Pty\Porta.Pty.csproj') -c Release -o $feed `
+        -p:Version=$Version -p:GeneratePackageOnBuild=false --nologo -v q
     if ($LASTEXITCODE -ne 0) { throw "pack failed" }
 
     # samples/Porta.Pty.Demo, the same consumer the other checks use. --hold keeps it alive after the
