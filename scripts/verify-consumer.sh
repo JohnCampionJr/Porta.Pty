@@ -71,3 +71,28 @@ dotnet build "$demo" \
 
 echo ">> running the demo"
 "$out/Porta.Pty.Demo"
+
+# Again with NO RuntimeIdentifier. Porta.Pty must be consumable from a RID-independent project — a
+# library that forces every consumer to pin a RID is not a portable library — and on this platform that
+# claim is fully testable: the POSIX shim resolves through deps.json from runtimes/<rid>/native/ with no
+# flattening. (On Windows the equivalent question is whether conpty.dll finds its host beside itself in
+# that layout, which only a process census answers: scripts/Verify-ConPtyHost.ps1 -NoRid.)
+#
+# UseCurrentRuntimeIdentifier is turned off explicitly: the sample sets it so a plain `dotnet run` is
+# honest about what a consumer gets, and it would otherwise quietly reintroduce a RID here.
+echo ">> building the same consumer with NO RuntimeIdentifier (portable)"
+portable="$scratch/portable"
+dotnet restore "$demo" \
+    -p:PortaPtyPackageVersion="$version" \
+    -p:UseCurrentRuntimeIdentifier=false \
+    --configfile "$scratch/nuget.config" \
+    --packages "$scratch/packages" \
+    -v q
+dotnet build "$demo" \
+    -p:PortaPtyPackageVersion="$version" \
+    -p:UseCurrentRuntimeIdentifier=false \
+    --packages "$scratch/packages" \
+    --no-restore -c Release -o "$portable" --nologo -v q
+
+echo ">> running the portable demo"
+"$portable/Porta.Pty.Demo"

@@ -23,6 +23,13 @@
     box: an x64 process runs there under emulation and needs the x64 host, and that is the case a
     flat copy silently broke.
 
+.PARAMETER NoRid
+    Build the consumer with NO RuntimeIdentifier — the portable layout, where native assets stay under
+    runtimes/win-<arch>/native/ rather than being flattened into the app root. Checks that each
+    conpty.dll got its matching host staged beside it, which is what allows a RID-independent project to
+    use out-of-band ConPTY at all. Whether conpty.dll then LOOKS there is a separate question, and only
+    Verify-ConPtyHost.ps1 -NoRid answers it.
+
 .PARAMETER Aot
     Also publish the consumer with PublishAot and run that. This is the interop question rather than the
     packaging one: CsWin32 source-generates its P/Invoke, so there is nothing for the trimmer to fail to
@@ -38,6 +45,7 @@
 param(
     [string] $Rid = 'win-arm64',
     [string] $Version = '1.0.0-verify',
+    [switch] $NoRid,
     [switch] $Aot,
     [switch] $KeepScratch
 )
@@ -51,6 +59,28 @@ $failures = @()
 
 function Assert-Staged {
     param([string] $Root, [string] $Label)
+
+    if ($NoRid) {
+        # Portable: one conpty.dll per architecture, each with its own host beside it. x86 ships no host
+        # in this package's staging, so it is not required here.
+        foreach ($pair in @(
+            @{ dll = 'runtimes\win-x64\native\conpty.dll';   host = 'runtimes\win-x64\native\x64\OpenConsole.exe' },
+            @{ dll = 'runtimes\win-arm64\native\conpty.dll'; host = 'runtimes\win-arm64\native\arm64\OpenConsole.exe' })) {
+            foreach ($rel in @($pair.dll, $pair.host)) {
+                $path = Join-Path $Root $rel
+                if (Test-Path $path) {
+                    Write-Host ("    OK      {0,-46} {1,10:N0} bytes" -f $rel, (Get-Item $path).Length) -ForegroundColor Green
+                }
+                else {
+                    Write-Host ("    MISSING {0}" -f $rel) -ForegroundColor Red
+                    $script:failures += "$Label`: $rel"
+                }
+            }
+        }
+
+        return
+    }
+
     # All three, every time. conpty.dll alone is the exact shape of the bug: it is what a consumer
     # got before buildTransitive/Porta.Pty.targets existed, and it looks like success.
     foreach ($rel in @('conpty.dll', 'x64\OpenConsole.exe', 'arm64\OpenConsole.exe')) {
@@ -90,7 +120,8 @@ try {
     # PortaPtyPackageVersion swaps its ProjectReference for a real PackageReference — a ProjectReference
     # bypasses the .nupkg and so cannot observe any of this. --source keeps the local feed out of any
     # committed NuGet.config, so a plain clone is unaffected.
-    Write-Host ">> building samples/Porta.Pty.Demo against the packed library ($Rid)" -ForegroundColor Cyan
+    $layout = if ($NoRid) { 'portable, no RID' } else { $Rid }
+    Write-Host ">> building samples/Porta.Pty.Demo against the packed library ($layout)" -ForegroundColor Cyan
     $demo = Join-Path $repo 'samples\Porta.Pty.Demo\Porta.Pty.Demo.csproj'
     $packages = Join-Path $scratch 'packages'
 
@@ -110,11 +141,15 @@ try {
 </configuration>
 "@ | Set-Content $config
 
-    & dotnet restore $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid `
+    # UseCurrentRuntimeIdentifier has to be turned off explicitly: the sample sets it so a plain
+    # `dotnet run` is honest about what a consumer gets, and it would otherwise reintroduce a RID.
+    $ridArgs = if ($NoRid) { @('-p:UseCurrentRuntimeIdentifier=false') } else { @("-p:RuntimeIdentifier=$Rid") }
+
+    & dotnet restore $demo -p:PortaPtyPackageVersion=$Version @ridArgs `
         --configfile $config --packages $packages -v q
     if ($LASTEXITCODE -ne 0) { throw "consumer restore failed" }
 
-    & dotnet build $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid `
+    & dotnet build $demo -p:PortaPtyPackageVersion=$Version @ridArgs `
         --packages $packages --no-restore -c Release -o (Join-Path $consumer 'out') --nologo -v q
     if ($LASTEXITCODE -ne 0) { throw "consumer build failed" }
     Write-Host "  build output:" -ForegroundColor Cyan
@@ -122,7 +157,7 @@ try {
 
     # Publish separately: it is a different item pipeline (CopyToPublishDirectory), so passing on
     # build says nothing about it.
-    & dotnet publish $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid `
+    & dotnet publish $demo -p:PortaPtyPackageVersion=$Version @ridArgs `
         --packages $packages --no-restore -c Release -o (Join-Path $consumer 'pub') --nologo -v q
     if ($LASTEXITCODE -ne 0) { throw "consumer publish failed" }
     Write-Host "  publish output:" -ForegroundColor Cyan
@@ -136,8 +171,9 @@ try {
     # windows-latest is) can verify staging and nothing more. Skipping is reported rather than passed
     # over: a run that quietly checked less than it looks like it did is worse than one that says so.
     $hostArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
-    $ridArch = $Rid.Split('-')[-1].ToLowerInvariant()
-    $canRun = ($ridArch -eq $hostArch) -or ($hostArch -eq 'arm64' -and $ridArch -eq 'x64')
+    $ridArch = if ($NoRid) { $hostArch } else { $Rid.Split('-')[-1].ToLowerInvariant() }
+    # A portable build runs wherever it was built, so there is never an architecture reason to skip it.
+    $canRun = $NoRid -or ($ridArch -eq $hostArch) -or ($hostArch -eq 'arm64' -and $ridArch -eq 'x64')
 
     if ($canRun) {
         Write-Host "  running the demo:" -ForegroundColor Cyan
@@ -158,7 +194,7 @@ try {
         # produces is not a build error -- it publishes fine and then throws at the spawn.
         Write-Host "  publishing with PublishAot:" -ForegroundColor Cyan
         $aotOut = Join-Path $consumer 'aot'
-        & dotnet publish $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid `
+        & dotnet publish $demo -p:PortaPtyPackageVersion=$Version @ridArgs `
             -p:PublishAot=true --packages $packages -c Release -o $aotOut --nologo -v q
         if ($LASTEXITCODE -ne 0) {
             Write-Host "    AOT publish failed" -ForegroundColor Red
@@ -184,8 +220,8 @@ finally {
 
 Write-Host ''
 if ($failures.Count) {
-    Write-Host "FAILED ($Rid)" -ForegroundColor Red
+    Write-Host "FAILED ($layout)" -ForegroundColor Red
     $failures | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
     exit 1
 }
-Write-Host "PASSED ($Rid) - a package consumer receives conpty.dll and both hosts" -ForegroundColor Green
+Write-Host "PASSED ($layout) - a package consumer receives conpty.dll and its host(s)" -ForegroundColor Green

@@ -19,6 +19,16 @@
     Runtime identifier for the scratch consumer. On an ARM64 box run BOTH win-arm64 and win-x64: the
     x64 process runs under emulation and must get the x64 host.
 
+.PARAMETER NoRid
+    Build the consumer with NO RuntimeIdentifier — the portable layout, where native assets stay under
+    runtimes/win-<arch>/native/ instead of being flattened into the app root.
+
+    This is the question that decides whether Porta.Pty can be consumed by a RID-independent project and
+    still get out-of-band ConPTY. The library's resolver finds conpty.dll there, and the package stages
+    OpenConsole.exe beside it — but whether conpty.dll LOOKS beside itself for its host is undocumented,
+    and only the process census answers it. OpenConsole.exe in the tree means portable works; conhost.exe
+    means the host must be found some other way.
+
 .PARAMETER Mode
     auto  - the library's default (out-of-band, falling back to in-box if conpty.dll is absent)
     oob   - force out-of-band; throws rather than falling back, so a missing conpty.dll is visible
@@ -35,6 +45,7 @@ param(
     [ValidateSet('auto', 'oob', 'inbox')]
     [string] $Mode = 'auto',
     [string] $Version = '1.0.0-verify',
+    [switch] $NoRid,
     [int] $HoldSeconds = 20,
     [switch] $KeepScratch
 )
@@ -79,7 +90,8 @@ try {
 
     # samples/Porta.Pty.Demo, the same consumer the other checks use. --hold keeps it alive after the
     # round trip so the process tree can be photographed while a pty is genuinely open.
-    Write-Host ">> building samples/Porta.Pty.Demo against the packed library ($Rid)" -ForegroundColor Cyan
+    $layout = if ($NoRid) { 'portable, no RID' } else { $Rid }
+    Write-Host ">> building samples/Porta.Pty.Demo against the packed library ($layout)" -ForegroundColor Cyan
     $demo = Join-Path $repo 'samples\Porta.Pty.Demo\Porta.Pty.Demo.csproj'
     $packages = Join-Path $scratch 'packages'
 
@@ -99,11 +111,15 @@ try {
 </configuration>
 "@ | Set-Content $config
 
-    & dotnet restore $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid `
+    # UseCurrentRuntimeIdentifier has to be turned off explicitly: the sample sets it so a plain
+    # `dotnet run` is honest about what a consumer gets, and it would otherwise reintroduce a RID here.
+    $ridArgs = if ($NoRid) { @('-p:UseCurrentRuntimeIdentifier=false') } else { @("-p:RuntimeIdentifier=$Rid") }
+
+    & dotnet restore $demo -p:PortaPtyPackageVersion=$Version @ridArgs `
         --configfile $config --packages $packages -v q
     if ($LASTEXITCODE -ne 0) { throw "consumer restore failed" }
 
-    & dotnet build $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid `
+    & dotnet build $demo -p:PortaPtyPackageVersion=$Version @ridArgs `
         --packages $packages --no-restore -c Release -o (Join-Path $consumer 'out') --nologo -v q
     if ($LASTEXITCODE -ne 0) { throw "consumer build failed" }
 
@@ -140,10 +156,10 @@ try {
     }
 
     if ($openConsole.Count) {
-        Write-Host "PASSED ($Rid, $Mode) - out-of-band host OpenConsole.exe is what ran" -ForegroundColor Green; exit 0
+        Write-Host "PASSED ($layout, $Mode) - out-of-band host OpenConsole.exe is what ran" -ForegroundColor Green; exit 0
     }
     if ($conhost.Count) {
-        Write-Host "FAILED ($Rid, $Mode) - fell back to in-box conhost.exe." -ForegroundColor Red
+        Write-Host "FAILED ($layout, $Mode) - fell back to in-box conhost.exe." -ForegroundColor Red
         Write-Host "  This is the silent failure: conpty.dll loaded but found no host to launch." -ForegroundColor Red
         Write-Host "  Run Verify-ConPtyConsumerStaging.ps1 -Rid $Rid to see which file is missing." -ForegroundColor Red
         exit 1
