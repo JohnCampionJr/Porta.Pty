@@ -26,9 +26,22 @@
     <PortaPtyConPtyStagingImported>true</PortaPtyConPtyStagingImported>
   </PropertyGroup>
 
+  <!--
+    Only for a RID-specific build, because that is the only kind where the host can be reached.
+
+    Native assets from runtimes/<rid>/native/ are flattened into the app root ONLY when the build has a
+    RuntimeIdentifier. Without one, conpty.dll stays under runtimes/win-x64/native/ — where the imports,
+    pinned to DllImportSearchPath.AssemblyDirectory, will not find it — and the library correctly falls
+    back to in-box. Staging the hosts there would put 2.2MB of OpenConsole.exe into an output that cannot
+    use them, and would invite the reasonable question of why they are present when out-of-band is not
+    actually in play.
+
+    Measured: a consumer with no RuntimeIdentifier gets runtimes/win-{x86,x64,arm64}/native/conpty.dll
+    and nothing in the app root.
+  -->
   <Target Name="PortaPtyStageConPtyHost"
           AfterTargets="ResolveReferences"
-          Condition="'$(PortaPtyStageConPtyHost)' != 'false'">
+          Condition="'$(PortaPtyStageConPtyHost)' != 'false' And '$(RuntimeIdentifier)' != ''">
 
     <ItemGroup>
       <!-- <pkg>/runtimes/win-<rid>/native/conpty.dll -> up three to <pkg>/. Pure item transforms: a

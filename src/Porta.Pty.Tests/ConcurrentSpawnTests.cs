@@ -39,8 +39,9 @@ namespace Porta.Pty.Tests
     ///     mechanistic and single-process. It asks whether ConPTY holds a dead child's output for
     ///     a reader that shows up late. If this one fails, we have the mechanism outright and no
     ///     statistics are needed.
-    ///   * <see cref="ShortLivedProcesses_SpawnedConcurrently_AllDeliverTheirOutput"/> is the
-    ///     load-shaped one. Concurrency is what gives it teeth: downstream, the SEQUENTIAL version
+    ///   * <see cref="Concurrent_MinimalShell_DedicatedThreadReader"/> and
+    ///     <see cref="Concurrent_RealisticShell_DedicatedThreadReader"/> are the
+    ///     load-shaped ones. Concurrency is what gives it teeth: downstream, the SEQUENTIAL version
     ///     of this same assertion passed 30 times in a row against code that was provably broken,
     ///     because the spawn and the exit almost never interleave when nothing else is competing
     ///     for the machine. Do not "simplify" it back into a loop.

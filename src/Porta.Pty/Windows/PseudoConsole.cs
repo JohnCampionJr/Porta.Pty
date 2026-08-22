@@ -4,9 +4,11 @@
 namespace Porta.Pty.Windows
 {
     using System;
+    using System.Collections.Generic;
     using System.ComponentModel;
     using System.Runtime.InteropServices;
     using System.IO;
+    using System.Reflection;
     using System.Runtime.Versioning;
     // global:: is required, not stylistic. This namespace is Porta.Pty.WINDOWS, so an unqualified
     // `using Windows.Win32` binds relative to it and looks for Porta.Pty.Windows.Windows.Win32.
@@ -88,6 +90,14 @@ namespace Porta.Pty.Windows
         /// <c>System32\conpty.dll</c> — so an unqualified probe would find the OS copy and report
         /// available for something we would not be using.</para>
         ///
+        /// <para>And the directory probed is the one the IMPORTS resolve against, not
+        /// <see cref="AppContext.BaseDirectory"/>. Those are the same path for an ordinary application
+        /// and differ for a plugin or a custom load context, where this library sits somewhere other
+        /// than the host's base directory. Probing the wrong one is wrong in both directions: it can
+        /// report in-box while <c>conpty.dll</c> sits beside the assembly, or report out-of-band and
+        /// then fail the actual import. The base directory is still probed as a fallback, because
+        /// <see cref="Assembly.Location"/> is empty under single-file and native AOT.</para>
+        ///
         /// <para>Read once: the answer cannot change within a process, and a per-spawn probe on the
         /// terminal-creation path buys nothing.</para>
         /// </summary>
@@ -107,14 +117,110 @@ namespace Porta.Pty.Windows
                 return true;
             }
 
+            foreach (var directory in ProbeDirectories())
+            {
+                try
+                {
+                    if (NativeLibrary.TryLoad(Path.Combine(directory, "conpty.dll"), out _))
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception)
+                {
+                    // Keep probing: an unreadable candidate directory is not an answer about the others.
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Gets a value indicating whether the out-of-band host <c>OpenConsole.exe</c> is present.
+        /// </summary>
+        /// <remarks>
+        /// <para>Separate from <see cref="UseOutOfBand"/>, and the distinction is the whole point.
+        /// <c>conpty.dll</c> loads and works with no host beside it — it silently falls back to
+        /// conhost. So "we selected conpty.dll" and "we are actually running out-of-band" are different
+        /// claims, and reporting the first as the second produces exactly the false A/B this class was
+        /// written to measure: an experiment comparing out-of-band against in-box, where both arms are
+        /// conhost and the numbers agree beautifully.</para>
+        ///
+        /// <para>The host is per-PROCESS architecture, not per-machine: an x64 process on ARM64 Windows
+        /// runs under emulation and needs the x64 host, which is why the package stages both.</para>
+        ///
+        /// <para>This is still a necessary-not-sufficient check — it says the file is where the loader
+        /// will look, not that <c>conpty.dll</c> launched it. Only a process census proves that, which
+        /// is what <c>scripts/Verify-ConPtyHost.ps1</c> does.</para>
+        /// </remarks>
+        public static bool OutOfBandHostPresent { get; } = ResolveHostPresent();
+
+        private static bool ResolveHostPresent()
+        {
+            var architecture = RuntimeInformation.ProcessArchitecture switch
+            {
+                Architecture.X86 => "x86",
+                Architecture.X64 => "x64",
+                Architecture.Arm64 => "arm64",
+                _ => null,
+            };
+
+            if (architecture is null)
+            {
+                return false;
+            }
+
+            foreach (var directory in ProbeDirectories())
+            {
+                try
+                {
+                    if (File.Exists(Path.Combine(directory, architecture, "OpenConsole.exe")))
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception)
+                {
+                    // An unreadable candidate is not an answer about the others.
+                }
+            }
+
+            return false;
+        }
+
+        private static IEnumerable<string> ProbeDirectories()
+        {
+            // The assembly's own directory first — that is what DllImportSearchPath.AssemblyDirectory
+            // resolves against, so it is the only candidate whose answer is guaranteed to match the
+            // import. Location is empty for single-file and native AOT, where the base directory is the
+            // right answer anyway.
+            string? assemblyDirectory = null;
+
             try
             {
-                return NativeLibrary.TryLoad(
-                    Path.Combine(AppContext.BaseDirectory, "conpty.dll"), out _);
+                var location = typeof(PseudoConsole).Assembly.Location;
+                if (!string.IsNullOrEmpty(location))
+                {
+                    assemblyDirectory = Path.GetDirectoryName(location);
+                }
             }
             catch (Exception)
             {
-                return false;
+                // Some hosts refuse Location outright; fall through to the base directory.
+            }
+
+            if (!string.IsNullOrEmpty(assemblyDirectory))
+            {
+                yield return assemblyDirectory!;
+            }
+
+            var baseDirectory = AppContext.BaseDirectory;
+            if (!string.IsNullOrEmpty(baseDirectory) &&
+                !string.Equals(baseDirectory.TrimEnd(Path.DirectorySeparatorChar),
+                               assemblyDirectory?.TrimEnd(Path.DirectorySeparatorChar),
+                               StringComparison.OrdinalIgnoreCase))
+            {
+                yield return baseDirectory;
             }
         }
 

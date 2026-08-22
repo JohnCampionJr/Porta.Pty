@@ -29,9 +29,15 @@
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <RepositoryUrl>https://github.com/tomlm/Porta.Pty</RepositoryUrl>
     <Copyright>Tom Laird-McConnell All Rights Reserved</Copyright>
-    <Version>1.0.7</Version>
-    <AssemblyVersion>1.0.7.0</AssemblyVersion>
+    <!-- 2.0.0: the target framework moves netstandard2.0 -> net10.0, which is a breaking change for any
+         .NET Framework or netstandard consumer, and Vanara leaves the dependency graph. -->
+    <Version>2.0.0</Version>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
     <RootNamespace>Porta.Pty</RootNamespace>
+    <Keyword>pty;conpty;ptty</Keyword>
+    <ContentTargetFolders>content</ContentTargetFolders>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <PropertyGroup>

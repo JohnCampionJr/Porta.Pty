@@ -251,8 +251,10 @@ peakOpenConsole=n        → genuinely out-of-band for n pseudoconsoles
 
 The A/B harness — process census, per-implementation runs, and the summary-file capture that MTP
 requires (it surfaces a test's console output only when the test *fails*, and every number here comes
-from a passing run) — is preserved commented-out in `.github/workflows/ci.yml`. The winrunner version,
-which runs it four-wide on contended self-hosted hardware, lives in the downstream consumer's repo.
+from a passing run) — is not checked in here; it and the winrunner
+version, which runs it four-wide on contended self-hosted hardware, live in the downstream consumer's
+repo. The reusable part is `scripts/Verify-ConPtyHost.ps1`, which runs the process census against a
+real packaged consumer.
 
 ## Payload, for the record
 

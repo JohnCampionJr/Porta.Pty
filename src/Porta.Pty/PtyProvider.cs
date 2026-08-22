@@ -26,6 +26,17 @@ namespace Porta.Pty
         /// is absent, so <c>PORTAPTY_CONPTY</c> does not tell you what is actually in play. Anything
         /// reporting the implementation from the environment variable will be wrong exactly when the
         /// fallback fires.</para>
+        ///
+        /// <para>Values: <c>posix</c>, <c>inbox</c>, <c>oob</c>, and <c>oob-no-host</c>. The last one
+        /// is the interesting one — <c>conpty.dll</c> was selected and loaded, but its
+        /// <c>OpenConsole.exe</c> is not there, so it will fall back to conhost without saying so. It
+        /// is reported separately rather than as <c>oob</c> because a diagnostic that cannot tell those
+        /// two apart is worse than none: it makes an A/B of out-of-band against in-box come out even,
+        /// both arms being conhost.</para>
+        ///
+        /// <para>Necessary, not sufficient: <c>oob</c> means the host is where the loader will look,
+        /// not that it was launched. <c>scripts/Verify-ConPtyHost.ps1</c> settles that from the process
+        /// tree.</para>
         /// </summary>
         public static string PseudoConsoleImplementation
         {
@@ -40,7 +51,16 @@ namespace Porta.Pty
                 // version floor that OperatingSystem.IsWindows() alone cannot assert, and reading a
                 // static bool is harmless on any Windows.
 #pragma warning disable CA1416
-                return Windows.PseudoConsole.UseOutOfBand ? "oob" : "inbox";
+                if (!Windows.PseudoConsole.UseOutOfBand)
+                {
+                    return "inbox";
+                }
+
+                // "oob" is a claim about what will RUN, so it is not made on the strength of having
+                // selected conpty.dll. conpty.dll with no OpenConsole.exe beside it falls back to
+                // conhost without erroring, and reporting that as "oob" is the false A/B this library's
+                // own measurements had to be protected from: both arms conhost, numbers in agreement.
+                return Windows.PseudoConsole.OutOfBandHostPresent ? "oob" : "oob-no-host";
 #pragma warning restore CA1416
             }
         }
