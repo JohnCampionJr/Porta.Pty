@@ -75,34 +75,6 @@ namespace Porta.Pty.Windows
         }
 
         /// <summary>
-        /// Gets a value indicating whether the out-of-band <c>conpty.dll</c> is selected.
-        ///
-        /// <para>Out-of-band is the DEFAULT, and falls back to in-box when <c>conpty.dll</c> is not
-        /// beside the assembly. That fallback is what makes the default safe: a consumer that has not
-        /// referenced the ConPTY package, or whose output is not RID-specific, gets the in-box
-        /// implementation rather than a <see cref="DllNotFoundException"/> on its first terminal.</para>
-        ///
-        /// <para><c>PORTAPTY_CONPTY</c> overrides in either direction: <c>inbox</c> forces kernel32,
-        /// <c>oob</c> forces conpty.dll and lets it throw if it is missing, which is what a consumer
-        /// wants when it believes it is set up and would rather know it is not.</para>
-        ///
-        /// <para>Probed by absolute path rather than by attempting a call: the imports below pin the
-        /// search to the assembly directory, and Windows 11 ships its own
-        /// <c>System32\conpty.dll</c> — so an unqualified probe would find the OS copy and report
-        /// available for something we would not be using.</para>
-        ///
-        /// <para>And the directory probed is the one the IMPORTS resolve against, not
-        /// <see cref="AppContext.BaseDirectory"/>. Those are the same path for an ordinary application
-        /// and differ for a plugin or a custom load context, where this library sits somewhere other
-        /// than the host's base directory. Probing the wrong one is wrong in both directions: it can
-        /// report in-box while <c>conpty.dll</c> sits beside the assembly, or report out-of-band and
-        /// then fail the actual import. The base directory is still probed as a fallback, because
-        /// <see cref="Assembly.Location"/> is empty under single-file and native AOT.</para>
-        ///
-        /// <para>Read once: the answer cannot change within a process, and a per-spawn probe on the
-        /// terminal-creation path buys nothing.</para>
-        /// </summary>
-        /// <summary>
         /// Initializes static members of the <see cref="PseudoConsole"/> class.
         /// </summary>
         /// <remarks>
@@ -124,6 +96,34 @@ namespace Porta.Pty.Windows
             UseOutOfBand = ResolvePreference();
         }
 
+        /// <summary>
+        /// Gets a value indicating whether the out-of-band <c>conpty.dll</c> is selected.
+        ///
+        /// <para>Out-of-band is the DEFAULT, and falls back to in-box when <c>conpty.dll</c> is not
+        /// beside the assembly. That fallback is what makes the default safe: a consumer that has not
+        /// referenced the ConPTY package gets the in-box implementation rather than a
+        /// <see cref="DllNotFoundException"/> on its first terminal.</para>
+        ///
+        /// <para><c>PORTAPTY_CONPTY</c> overrides in either direction: <c>inbox</c> forces kernel32,
+        /// <c>oob</c> forces conpty.dll and lets it throw if it is missing, which is what a consumer
+        /// wants when it believes it is set up and would rather know it is not.</para>
+        ///
+        /// <para>Probed by absolute path rather than by attempting a call: the imports below pin the
+        /// search to the assembly directory, and Windows 11 ships its own
+        /// <c>System32\conpty.dll</c> — so an unqualified probe would find the OS copy and report
+        /// available for something we would not be using.</para>
+        ///
+        /// <para>And the directory probed is the one the IMPORTS resolve against, not
+        /// <see cref="AppContext.BaseDirectory"/>. Those are the same path for an ordinary application
+        /// and differ for a plugin or a custom load context, where this library sits somewhere other
+        /// than the host's base directory. Probing the wrong one is wrong in both directions: it can
+        /// report in-box while <c>conpty.dll</c> sits beside the assembly, or report out-of-band and
+        /// then fail the actual import. The base directory is still probed as a fallback, because
+        /// <see cref="Assembly.Location"/> is empty under single-file and native AOT.</para>
+        ///
+        /// <para>Read once: the answer cannot change within a process, and a per-spawn probe on the
+        /// terminal-creation path buys nothing.</para>
+        /// </summary>
         public static bool UseOutOfBand { get; }
 
         /// <summary>

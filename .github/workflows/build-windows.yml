@@ -51,6 +51,23 @@ jobs:
       run: ./scripts/Verify-ConPtyConsumerStaging.ps1 -Rid win-arm64
       shell: pwsh
 
+    # And with NO RuntimeIdentifier, which is the layout the newest Windows code exists to handle and
+    # the only one nothing else here covers. verify-consumer.sh does the portable case on Linux and
+    # macOS, but ConPtyImportResolver and the runtimes/win-<arch>/native probe do not exist there — so
+    # without this step the portable path ships with no regression guard at all.
+    - name: Verify a package consumer works (portable, no RID)
+      run: ./scripts/Verify-ConPtyConsumerStaging.ps1 -NoRid
+      shell: pwsh
+
+    # Files on disk is the weaker claim. This is the process census, and it is the only DIRECT evidence
+    # of which implementation is live: in-box spawns a conhost.exe per pseudoconsole, out-of-band an
+    # OpenConsole.exe. It matters most in the portable layout, which rests on conpty.dll launching its
+    # host from an <arch>/ subdirectory of its OWN directory — behaviour confirmed by census rather than
+    # documented anywhere, so it is exactly the kind of thing that can change underneath us silently.
+    - name: Verify the out-of-band host actually launched (portable, no RID)
+      run: ./scripts/Verify-ConPtyHost.ps1 -NoRid
+      shell: pwsh
+
     # Native AOT is a different question from packaging: whether the interop survives with no JIT and no
     # reflection fallback. This is the configuration reported broken in
     # tomlm/Iciclecreek.Avalonia.Terminal#6 ("Unable to convert object to its binary format"). The sample

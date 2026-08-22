@@ -34,7 +34,10 @@
     <Version>2.0.0</Version>
     <AssemblyVersion>2.0.0.0</AssemblyVersion>
     <RootNamespace>Porta.Pty</RootNamespace>
-    <Keyword>pty;conpty;ptty</Keyword>
+    <!-- PackageTags, not Keyword. Keyword is a Visual C++ project property that NuGet never reads, so
+         the tags had been packing as nothing: the generated nuspec carried no <tags> element at all.
+         Silent, because an absent tag list is a legitimate package. -->
+    <PackageTags>pty;conpty;ptty</PackageTags>
     <ContentTargetFolders>content</ContentTargetFolders>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
