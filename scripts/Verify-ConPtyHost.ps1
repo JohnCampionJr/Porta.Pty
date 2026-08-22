@@ -113,7 +113,10 @@ try {
 
     # UseCurrentRuntimeIdentifier has to be turned off explicitly: the sample sets it so a plain
     # `dotnet run` is honest about what a consumer gets, and it would otherwise reintroduce a RID here.
-    $ridArgs = if ($NoRid) { @('-p:UseCurrentRuntimeIdentifier=false') } else { @("-p:RuntimeIdentifier=$Rid") }
+    # [string[]] is load-bearing. `$x = if (...) { @('one') }` UNWRAPS a single-element array to a
+    # bare string, and splatting a string with @x enumerates its CHARACTERS — MSBuild received
+    # '-', 'p', ':', 'U', ... as separate arguments. The cast keeps it an array in both branches.
+    [string[]] $ridArgs = if ($NoRid) { @('-p:UseCurrentRuntimeIdentifier=false') } else { @("-p:RuntimeIdentifier=$Rid") }
 
     & dotnet restore $demo -p:PortaPtyPackageVersion=$Version @ridArgs `
         --configfile $config --packages $packages -v q

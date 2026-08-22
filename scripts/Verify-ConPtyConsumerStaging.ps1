@@ -143,7 +143,10 @@ try {
 
     # UseCurrentRuntimeIdentifier has to be turned off explicitly: the sample sets it so a plain
     # `dotnet run` is honest about what a consumer gets, and it would otherwise reintroduce a RID.
-    $ridArgs = if ($NoRid) { @('-p:UseCurrentRuntimeIdentifier=false') } else { @("-p:RuntimeIdentifier=$Rid") }
+    # [string[]] is load-bearing. `$x = if (...) { @('one') }` UNWRAPS a single-element array to a
+    # bare string, and splatting a string with @x enumerates its CHARACTERS — MSBuild received
+    # '-', 'p', ':', 'U', ... as separate arguments. The cast keeps it an array in both branches.
+    [string[]] $ridArgs = if ($NoRid) { @('-p:UseCurrentRuntimeIdentifier=false') } else { @("-p:RuntimeIdentifier=$Rid") }
 
     & dotnet restore $demo -p:PortaPtyPackageVersion=$Version @ridArgs `
         --configfile $config --packages $packages -v q
@@ -173,7 +176,11 @@ try {
     $hostArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     $ridArch = if ($NoRid) { $hostArch } else { $Rid.Split('-')[-1].ToLowerInvariant() }
     # A portable build runs wherever it was built, so there is never an architecture reason to skip it.
-    $canRun = $NoRid -or ($ridArch -eq $hostArch) -or ($hostArch -eq 'arm64' -and $ridArch -eq 'x64')
+    $archOk = $NoRid -or ($ridArch -eq $hostArch) -or ($hostArch -eq 'arm64' -and $ridArch -eq 'x64')
+    # And the OS has to match, which is not implied by the architecture: the staging half of this script
+    # works fine from macOS or Linux (a win-x64 build stages the Windows natives like any other file),
+    # so it is worth being able to run it there — but only the assertions, not the executable.
+    $canRun = $archOk -and $IsWindows
 
     if ($canRun) {
         Write-Host "  running the demo:" -ForegroundColor Cyan
@@ -184,7 +191,8 @@ try {
         }
     }
     else {
-        Write-Host "  SKIPPED the round trip - a $ridArch binary cannot run on a $hostArch host" -ForegroundColor Yellow
+        $why = if (-not $IsWindows) { "this is not Windows" } else { "a $ridArch binary cannot run on a $hostArch host" }
+        Write-Host "  SKIPPED the round trip - $why" -ForegroundColor Yellow
         Write-Host "  (staging above was still verified)" -ForegroundColor Yellow
     }
 
