@@ -1,0 +1,61 @@
+<Project>
+
+  <!--
+    Stage OpenConsole.exe for CONSUMERS of this package.
+
+    Microsoft.Windows.Console.ConPTY splits its payload in two, and only one half travels transitively:
+
+      runtimes/win-<arch>/native/conpty.dll   flows to any consumer, direct or transitive
+      build/native/runtimes/<arch>/OpenConsole.exe  staged by the package's own build/ targets
+
+    Files under build/ import for a DIRECT PackageReference only. Porta.Pty references ConPTY, so our
+    build stages the host and our tests pass; a consumer of Porta.Pty gets conpty.dll and nothing else.
+    conpty.dll with no host to launch does not fail — it falls back to in-box conhost SILENTLY, which is
+    the exact behaviour the out-of-band package was taken to avoid. Verified by packing this library and
+    building a win-x64 consumer against it: the output had conpty.dll alone.
+
+    Setting ConptyRequires*Host from here cannot fix it: the targets that read those flags are the ones
+    that never import. So we add the items ourselves.
+
+    The package directory is DERIVED from the resolved conpty.dll rather than composed from
+    NuGetPackageRoot and a version literal. The consumer's graph decides which ConPTY version wins — a
+    direct reference or a unification can move it — and a hard-coded version would resolve to a path that
+    silently does not exist. Walking up from the file that actually got resolved cannot disagree with it.
+  -->
+  <PropertyGroup>
+    <PortaPtyConPtyStagingImported>true</PortaPtyConPtyStagingImported>
+  </PropertyGroup>
+
+  <Target Name="PortaPtyStageConPtyHost"
+          AfterTargets="ResolveReferences"
+          Condition="'$(PortaPtyStageConPtyHost)' != 'false'">
+
+    <ItemGroup>
+      <!-- <pkg>/runtimes/win-<rid>/native/conpty.dll -> up three to <pkg>/. Pure item transforms: a
+           %() reference inside a PropertyGroup would batch the whole target instead, and a Condition
+           mixing %(Identity) with qualified metadata silently produces nothing. -->
+      <_PortaPtyConPtyDll Include="@(ReferenceCopyLocalPaths)"
+                          Condition="'%(Filename)%(Extension)' == 'conpty.dll'" />
+
+      <!-- Both hosts: an x64 process runs on ARM64 Windows under emulation, and conpty.dll launches the
+           host matching the PROCESS, not the machine.
+
+           DestinationSubDirectory, NOT TargetPath. _CopyFilesMarkedCopyLocal composes its destination
+           as $(OutDir)%(DestinationSubDirectory)%(Filename)%(Extension) and never reads TargetPath, so
+           with TargetPath both hosts copy FLAT and the second silently overwrites the first — measured:
+           a win-x64 consumer ended up with one OpenConsole.exe at the root, the ARM64 one. -->
+      <ReferenceCopyLocalPaths Include="@(_PortaPtyConPtyDll->'%(RootDir)%(Directory)../../../build/native/runtimes/x64/OpenConsole.exe')">
+        <DestinationSubDirectory>x64\</DestinationSubDirectory>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ReferenceCopyLocalPaths>
+      <ReferenceCopyLocalPaths Include="@(_PortaPtyConPtyDll->'%(RootDir)%(Directory)../../../build/native/runtimes/arm64/OpenConsole.exe')">
+        <DestinationSubDirectory>arm64\</DestinationSubDirectory>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ReferenceCopyLocalPaths>
+    </ItemGroup>
+
+  </Target>
+
+</Project>

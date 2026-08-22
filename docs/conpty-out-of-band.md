@@ -259,3 +259,40 @@ which runs it four-wide on contended self-hosted hardware, lives in the downstre
 Smaller than usually assumed: `conpty.dll` is 88-108 KB per architecture and `OpenConsole.exe` is
 ~1.0-1.1 MB per architecture, one-time. The process model is unchanged — one host process per
 pseudoconsole either way, just `OpenConsole.exe` instead of `conhost.exe`.
+
+## What a consumer of the package has to do: nothing
+
+Worth stating explicitly, because it was not true until it was tested.
+
+`Microsoft.Windows.Console.ConPTY` splits its payload across two locations, and only one half travels
+transitively:
+
+| path in the ConPTY package | reaches a transitive consumer? |
+|---|---|
+| `runtimes/win-<arch>/native/conpty.dll` | yes — ordinary native asset resolution |
+| `build/native/runtimes/<arch>/OpenConsole.exe` | **no** — `build/` imports for a DIRECT reference only |
+
+Porta.Pty references ConPTY directly, so its own build stages the host and its own tests pass. A consumer
+of *Porta.Pty* got `conpty.dll` and nothing else — and `conpty.dll` with no host to launch does not fail.
+It falls back to in-box conhost **silently**: no error, no warning, just the behaviour the out-of-band
+package was taken to avoid. Nothing in a consumer's build or run output says so.
+
+Measured by packing the library and building a `win-x64` consumer against it — the output directory held
+`conpty.dll` alone.
+
+`buildTransitive/Porta.Pty.targets` closes it, so there is no metadata for a consumer to discover. Two
+details in there are load-bearing:
+
+* **The ConPTY package directory is derived from the resolved `conpty.dll`**, not composed from
+  `NuGetPackageRoot` plus a version literal. The consumer's graph decides which ConPTY version wins — a
+  direct reference or a unification can move it — and a hard-coded version resolves to a path that
+  quietly does not exist. Walking up from the file that actually resolved cannot disagree with it.
+* **`DestinationSubDirectory`, not `TargetPath`.** `_CopyFilesMarkedCopyLocal` builds its destination as
+  `$(OutDir)%(DestinationSubDirectory)%(Filename)%(Extension)` and never reads `TargetPath`. With
+  `TargetPath` both hosts copy flat and the second overwrites the first: a `win-x64` consumer ended up
+  with a single `OpenConsole.exe` at the output root, and it was the **ARM64** one.
+
+Setting `ConptyRequiresx64Host` / `ConptyRequiresARM64Host` from a shipped `.props` cannot fix this — the
+targets that read those flags are precisely the ones that never import.
+
+To opt out (a consumer staging the host itself), set `PortaPtyStageConPtyHost=false`.

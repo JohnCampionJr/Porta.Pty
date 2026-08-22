@@ -57,6 +57,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- buildTransitive: ConPTY ships its host-staging logic under build/, which imports for a DIRECT
+         reference only — so a CONSUMER of this package must be given it. See the file. -->
+    <None Include="build/Porta.Pty.targets" Pack="true" PackagePath="buildTransitive/" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Remove="NativeMethods.txt" />
     <AdditionalFiles Include="NativeMethods.txt" />
   </ItemGroup>
