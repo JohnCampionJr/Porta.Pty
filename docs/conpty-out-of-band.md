@@ -65,8 +65,8 @@ Three things about the answer, each learned by getting it wrong first:
   have paid anyway.
 
 **The default falls back to in-box when `conpty.dll` is not beside the assembly.** That is what makes
-defaulting safe — a consumer without the ConPTY package, or without a RID-specific output, degrades
-instead of throwing `DllNotFoundException` on its first terminal. `PORTAPTY_CONPTY=inbox` forces
+defaulting safe — a consumer without the ConPTY package degrades instead of throwing
+`DllNotFoundException` on its first terminal. `PORTAPTY_CONPTY=inbox` forces
 kernel32; `PORTAPTY_CONPTY=oob` forces conpty.dll and deliberately does **not** fall back, because a
 consumer that believes it is set up would rather find out that it is not.
 
@@ -75,11 +75,25 @@ environment variable — that stops being the answer exactly when the fallback f
 
 ### For a consumer that wants out-of-band
 
-The library ships the natives, but the SDK's default layout puts them where `conpty.dll` cannot find
-its host. A consuming application needs a **RID-specific output** (`UseCurrentRuntimeIdentifier`, a
-`RuntimeIdentifier`, or a RID-specific publish), which flattens `conpty.dll` into the app root beside
-the `x64/` and `arm64/` host folders the package stages. Without it the fallback quietly selects in-box,
-which is correct but is not what was asked for — check `PseudoConsoleImplementation` if it matters.
+**Nothing.** No property, no ConPTY package reference, and — since it was true for a while and is worth
+saying plainly — **no RuntimeIdentifier**. A RID-independent project gets the out-of-band path.
+
+That takes two things, because the SDK produces two different layouts and only one of them is the
+obvious one:
+
+| build | where `conpty.dll` lands | where its host is staged |
+|---|---|---|
+| RID-specific | app root | `x64/`, `arm64/` |
+| portable (no RID) | `runtimes/win-<arch>/native/` | `runtimes/win-<arch>/native/<arch>/` |
+
+`buildTransitive/Porta.Pty.targets` stages each host **next to its own `conpty.dll`**, deriving the
+destination from the DLL's `DestinationSubDirectory` rather than assuming the flattened case; and the
+import resolver in `ConPtyImportResolver` looks in the portable location too, so the pinned
+`AssemblyDirectory` imports do not miss it there.
+
+The portable case was verified on Windows ARM64 by process census — `OpenConsole.exe` in the tree with
+the default, `conhost.exe` with `PORTAPTY_CONPTY=inbox` as the control. `scripts/Verify-ConPtyHost.ps1
+-NoRid` is that check.
 
 ### For a consumer that only reads
 
@@ -231,13 +245,23 @@ entirely worthless, because the "out-of-band" arm was quietly running conhost th
    imports.** Recent Windows 11 builds ship their own `C:\Windows\System32\conpty.dll`, so an
    unqualified `DllImport("conpty.dll")` can resolve the OS copy — which is backed by conhost, i.e.
    exactly the implementation this path exists to be an alternative to.
-3. **A RID-specific output** (`UseCurrentRuntimeIdentifier`). `conpty.dll` launches `OpenConsole.exe`
-   from an `<arch>/` subdirectory of **its own** directory, and the package stages the hosts at
-   `<output>/x64` and `<output>/arm64`. The SDK's default layout puts the DLL under
-   `runtimes/win-<rid>/native`, where no such subdirectory exists. This is also what makes (2)
-   meaningful rather than inert, since the DLL is only then actually in the assembly directory.
+3. **The host in an `<arch>/` subdirectory of `conpty.dll`'s OWN directory.** That is where
+   `conpty.dll` looks — confirmed by census, not by documentation, since the package ships none — so
+   where the host belongs depends on where the DLL landed, and that differs between a RID-specific and
+   a portable build. `buildTransitive/Porta.Pty.targets` derives it from the DLL's
+   `DestinationSubDirectory` instead of assuming.
 
-Any consumer wanting the out-of-band path needs all three, including the RID-specific output.
+   This used to read "a RID-specific output is required", and it was true only because nothing staged
+   the host into the portable layout: the DLL sat under `runtimes/win-<rid>/native` with no `<arch>/`
+   subdirectory beside it. Requiring a RID of every consumer was the wrong way to fix that.
+
+4. **An import resolver**, because (2) alone cannot see the portable layout. `AssemblyDirectory` is a
+   literal directory and knows nothing of `runtimes/`, while ordinary P/Invoke would find it through
+   deps.json — which is exactly the resolution we are refusing, since it is what lets the System32 copy
+   win. The resolver loads by absolute path, so it keeps (2)'s protection while extending its reach.
+
+A consumer needs none of these — the package carries all four. They are listed because each was found
+by something silently choosing conhost.
 
 ## Verifying it is really out-of-band
 

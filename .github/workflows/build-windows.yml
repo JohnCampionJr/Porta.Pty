@@ -50,3 +50,14 @@ jobs:
     - name: Verify a package consumer works (win-arm64)
       run: ./scripts/Verify-ConPtyConsumerStaging.ps1 -Rid win-arm64
       shell: pwsh
+
+    # Native AOT is a different question from packaging: whether the interop survives with no JIT and no
+    # reflection fallback. This is the configuration reported broken in
+    # tomlm/Iciclecreek.Avalonia.Terminal#6 ("Unable to convert object to its binary format"). The sample
+    # asserts RuntimeFeature.IsDynamicCodeSupported is FALSE first, so a misconfigured publish that
+    # quietly produced an ordinary binary fails rather than passing.
+    - name: Native AOT demo
+      run: |
+        dotnet publish samples/Porta.Pty.AotDemo/Porta.Pty.AotDemo.csproj -c Release -o aot --nologo
+        ./aot/Porta.Pty.AotDemo.exe
+      shell: pwsh

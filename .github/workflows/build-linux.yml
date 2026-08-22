@@ -65,3 +65,11 @@ jobs:
     # .nupkg, no runtimes/ resolution, no buildTransitive/. This packs and consumes for real.
     - name: Verify a package consumer works
       run: ./scripts/verify-consumer.sh
+
+    # Native AOT is a different question from packaging: whether the interop survives with no JIT and no
+    # reflection fallback. The sample asserts RuntimeFeature.IsDynamicCodeSupported is FALSE first, so a
+    # misconfigured publish that quietly produced an ordinary binary fails rather than passing.
+    - name: Native AOT demo
+      run: |
+        dotnet publish samples/Porta.Pty.AotDemo/Porta.Pty.AotDemo.csproj -c Release -o aot --nologo
+        ./aot/Porta.Pty.AotDemo

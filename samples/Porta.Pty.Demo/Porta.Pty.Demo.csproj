@@ -6,8 +6,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
-    <!-- A RID is required for the ConPTY natives to be staged at all on Windows. Defaulting to the
-         host's keeps a plain `dotnet run` here honest about what a real consumer gets. -->
+    <!-- Defaults to the host's RID so a plain `dotnet run` here exercises the flattened layout, which
+         is the one most consumers will have. It is a default, NOT a requirement: a portable build gets
+         out-of-band ConPTY too (verified by census on Windows ARM64), and the verify scripts build this
+         same sample with -p:UseCurrentRuntimeIdentifier=false to prove it. -->
     <UseCurrentRuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">true</UseCurrentRuntimeIdentifier>
   </PropertyGroup>
 
