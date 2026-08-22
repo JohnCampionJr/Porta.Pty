@@ -39,6 +39,29 @@
     Measured: a consumer with no RuntimeIdentifier gets runtimes/win-{x86,x64,arm64}/native/conpty.dll
     and nothing in the app root.
   -->
+  <!--
+    Say so, at build time, when out-of-band ConPTY cannot possibly be in play.
+
+    Without a RuntimeIdentifier the SDK cannot flatten native assets into the app root — a portable
+    build has to run anywhere, so it keeps the runtimes/ tree — and Porta.Pty's imports are pinned to
+    DllImportSearchPath.AssemblyDirectory (deliberately: Windows 11 ships a conhost-backed
+    System32\conpty.dll that an unpinned import binds happily). The library then correctly falls back to
+    in-box, and NOTHING says so: same API, same working pty, quietly not the implementation asked for.
+
+    That is precisely the class of thing worth a build warning rather than a doc paragraph, since the
+    consumer who needs to know is the one who never read the doc. Suppress with
+    PortaPtyNoRuntimeIdentifierWarning=false, or the usual $(NoWarn) via the code below.
+  -->
+  <Target Name="PortaPtyWarnWithoutRuntimeIdentifier"
+          AfterTargets="ResolveReferences"
+          Condition="'$(RuntimeIdentifier)' == ''
+                     And '$(PortaPtyNoRuntimeIdentifierWarning)' != 'false'
+                     And '$(OS)' == 'Windows_NT'
+                     And !$(NoWarn.Contains('PORTAPTY001'))">
+    <Warning Code="PORTAPTY001"
+             Text="Porta.Pty: no RuntimeIdentifier, so out-of-band ConPTY is unavailable and the in-box console host will be used. Set UseCurrentRuntimeIdentifier=true, a RuntimeIdentifier, or publish with -r &lt;rid&gt;. Suppress with PortaPtyNoRuntimeIdentifierWarning=false." />
+  </Target>
+
   <Target Name="PortaPtyStageConPtyHost"
           AfterTargets="ResolveReferences"
           Condition="'$(PortaPtyStageConPtyHost)' != 'false' And '$(RuntimeIdentifier)' != ''">

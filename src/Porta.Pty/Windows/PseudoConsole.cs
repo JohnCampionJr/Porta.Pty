@@ -102,7 +102,42 @@ namespace Porta.Pty.Windows
         /// <para>Read once: the answer cannot change within a process, and a per-spawn probe on the
         /// terminal-creation path buys nothing.</para>
         /// </summary>
-        public static bool UseOutOfBand { get; } = ResolvePreference();
+        /// <summary>
+        /// Initializes static members of the <see cref="PseudoConsole"/> class.
+        /// </summary>
+        /// <remarks>
+        /// Exists solely to install the import resolver, and it must run before any conpty.dll import
+        /// does. Every one of them is reached through this type, so this is the earliest point that is
+        /// also guaranteed to be reached — and, being a static constructor, to be reached once.
+        /// </remarks>
+        static PseudoConsole()
+        {
+            ConPtyImportResolver.Install();
+
+            // Assigned HERE, in dependency order, rather than by field initializer. Static initializers
+            // run in DECLARATION order, so UseOutOfBand — declared first, because it is the one callers
+            // care about — would have read a still-null ConPtyPath and reported in-box unconditionally.
+            // Nothing about that would have looked wrong: in-box is a legitimate answer, and the tests
+            // that exercise this path force the mode explicitly.
+            ConPtyPath = ResolveConPtyPath();
+            OutOfBandHostPresent = ResolveHostPresent();
+            UseOutOfBand = ResolvePreference();
+        }
+
+        public static bool UseOutOfBand { get; }
+
+        /// <summary>
+        /// Gets the absolute path of the <c>conpty.dll</c> this process will use, or
+        /// <see langword="null"/> when there isn't one.
+        /// </summary>
+        /// <remarks>
+        /// Resolved ONCE and used for both the availability answer and the actual load, via the import
+        /// resolver below. Those used to be separate lookups that could disagree — the probe read
+        /// <see cref="AppContext.BaseDirectory"/> while the imports resolved against the assembly
+        /// directory — and a probe that can disagree with the load is worse than no probe, because it
+        /// reports confidently in both wrong directions.
+        /// </remarks>
+        public static string? ConPtyPath { get; }
 
         private static bool ResolvePreference()
         {
@@ -115,25 +150,38 @@ namespace Porta.Pty.Windows
 
             if (string.Equals(preference, "oob", StringComparison.OrdinalIgnoreCase))
             {
+                // Deliberately does not check availability: a consumer that believes it is set up would
+                // rather have the load throw than be quietly downgraded.
                 return true;
             }
 
+            // BOTH halves, not just conpty.dll. Loading conpty.dll without its OpenConsole.exe does not
+            // fail and does not warn — it falls back to conhost internally — so selecting it on the
+            // strength of the DLL alone buys nothing over the in-box path and costs the ability to say
+            // which one ran. Taking in-box deliberately in that case keeps the two arms genuinely
+            // distinct, which is what makes any measurement of them mean anything.
+            return ConPtyPath is not null && OutOfBandHostPresent;
+        }
+
+        private static string? ResolveConPtyPath()
+        {
             foreach (var directory in ProbeDirectories())
             {
                 try
                 {
-                    if (NativeLibrary.TryLoad(Path.Combine(directory, "conpty.dll"), out _))
+                    var candidate = Path.Combine(directory, "conpty.dll");
+                    if (File.Exists(candidate))
                     {
-                        return true;
+                        return candidate;
                     }
                 }
                 catch (Exception)
                 {
-                    // Keep probing: an unreadable candidate directory is not an answer about the others.
+                    // An unreadable candidate directory is not an answer about the others.
                 }
             }
 
-            return false;
+            return null;
         }
 
         /// <summary>
@@ -141,20 +189,23 @@ namespace Porta.Pty.Windows
         /// </summary>
         /// <remarks>
         /// <para>Separate from <see cref="UseOutOfBand"/>, and the distinction is the whole point.
-        /// <c>conpty.dll</c> loads and works with no host beside it — it silently falls back to
-        /// conhost. So "we selected conpty.dll" and "we are actually running out-of-band" are different
-        /// claims, and reporting the first as the second produces exactly the false A/B this class was
-        /// written to measure: an experiment comparing out-of-band against in-box, where both arms are
-        /// conhost and the numbers agree beautifully.</para>
+        /// <c>conpty.dll</c> loads and works with no host beside it — it silently falls back to conhost.
+        /// So "we selected conpty.dll" and "we are actually running out-of-band" are different claims,
+        /// and reporting the first as the second produces the false A/B this class was written to
+        /// measure: out-of-band against in-box with both arms conhost, agreeing beautifully.</para>
         ///
-        /// <para>The host is per-PROCESS architecture, not per-machine: an x64 process on ARM64 Windows
-        /// runs under emulation and needs the x64 host, which is why the package stages both.</para>
+        /// <para>Looked for beside the RESOLVED <c>conpty.dll</c>, not beside the app, because that is
+        /// how the two travel: the package stages the hosts into arch subdirectories of whatever
+        /// directory <c>conpty.dll</c> lands in.</para>
         ///
-        /// <para>This is still a necessary-not-sufficient check — it says the file is where the loader
-        /// will look, not that <c>conpty.dll</c> launched it. Only a process census proves that, which
-        /// is what <c>scripts/Verify-ConPtyHost.ps1</c> does.</para>
+        /// <para>Per-PROCESS architecture, not per-machine: an x64 process on ARM64 Windows runs under
+        /// emulation and needs the x64 host, which is why both are shipped.</para>
+        ///
+        /// <para>Necessary, not sufficient — it says the file is where the loader will look, not that
+        /// <c>conpty.dll</c> launched it. Only a process census proves that, which is what
+        /// <c>scripts/Verify-ConPtyHost.ps1</c> does.</para>
         /// </remarks>
-        public static bool OutOfBandHostPresent { get; } = ResolveHostPresent();
+        public static bool OutOfBandHostPresent { get; }
 
         private static bool ResolveHostPresent()
         {
@@ -166,27 +217,21 @@ namespace Porta.Pty.Windows
                 _ => null,
             };
 
-            if (architecture is null)
+            if (architecture is null || ConPtyPath is null)
             {
                 return false;
             }
 
-            foreach (var directory in ProbeDirectories())
+            try
             {
-                try
-                {
-                    if (File.Exists(Path.Combine(directory, architecture, "OpenConsole.exe")))
-                    {
-                        return true;
-                    }
-                }
-                catch (Exception)
-                {
-                    // An unreadable candidate is not an answer about the others.
-                }
+                var directory = Path.GetDirectoryName(ConPtyPath);
+                return directory is not null
+                    && File.Exists(Path.Combine(directory, architecture, "OpenConsole.exe"));
             }
-
-            return false;
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         /// <summary>
@@ -194,10 +239,10 @@ namespace Porta.Pty.Windows
         /// </summary>
         /// <remarks>
         /// Split out so the IL3000 suppression covers only this, and so it is not applied to an iterator
-        /// (where it would sit on the method rather than the generated state machine that does the work).
-        /// The warning's advice — use <see cref="AppContext.BaseDirectory"/> — is what the caller already
-        /// falls back to; it cannot be the only answer here, because the imports resolve against the
-        /// ASSEMBLY directory and the two differ for a plugin or a custom load context.
+        /// (where it would sit on the method rather than the generated state machine doing the work).
+        /// The warning's advice — use <see cref="AppContext.BaseDirectory"/> — is what the caller falls
+        /// back to; it cannot be the only answer, because the imports resolve against the ASSEMBLY
+        /// directory and the two differ for a plugin or a custom load context.
         /// </remarks>
         [UnconditionalSuppressMessage(
             "SingleFile",
@@ -219,28 +264,70 @@ namespace Porta.Pty.Windows
             }
         }
 
+        /// <summary>
+        /// Gets the directories that may contain <c>conpty.dll</c>, in preference order.
+        /// </summary>
+        /// <remarks>
+        /// <para>The first two are the flattened layout a RID-specific build produces. The assembly's
+        /// own directory leads because that is what the imports would resolve against unaided, and the
+        /// base directory follows because <see cref="Assembly.Location"/> is empty under single-file and
+        /// native AOT.</para>
+        ///
+        /// <para>The last two are the PORTABLE layout, and they are why a RID is no longer required. A
+        /// build with no RuntimeIdentifier cannot flatten native assets — it has to be able to run
+        /// anywhere — so it keeps the whole <c>runtimes/</c> tree and lets the host pick at run time.
+        /// Ordinary P/Invoke handles that through deps.json, but ours cannot: the imports are pinned to
+        /// <see cref="DllImportSearchPath.AssemblyDirectory"/>, deliberately, because Windows 11 ships
+        /// its own conhost-backed <c>System32\conpty.dll</c> that an unpinned import will happily bind.
+        /// Looking in <c>runtimes/win-&lt;arch&gt;/native/</c> ourselves gets the portable layout back
+        /// without giving up that protection, since every load here is by absolute path.</para>
+        /// </remarks>
         private static IEnumerable<string> ProbeDirectories()
         {
-            // The assembly's own directory first — that is what DllImportSearchPath.AssemblyDirectory
-            // resolves against, so it is the only candidate whose answer is guaranteed to match the
-            // import. Empty under single-file and native AOT, where the base directory is the right
-            // answer anyway.
             var assemblyDirectory = AssemblyDirectory();
+            var baseDirectory = AppContext.BaseDirectory;
 
             if (!string.IsNullOrEmpty(assemblyDirectory))
             {
                 yield return assemblyDirectory!;
             }
 
-            var baseDirectory = AppContext.BaseDirectory;
-            if (!string.IsNullOrEmpty(baseDirectory) &&
-                !string.Equals(baseDirectory.TrimEnd(Path.DirectorySeparatorChar),
-                               assemblyDirectory?.TrimEnd(Path.DirectorySeparatorChar),
-                               StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrEmpty(baseDirectory) && !SameDirectory(baseDirectory, assemblyDirectory))
             {
                 yield return baseDirectory;
             }
+
+            var rid = RuntimeInformation.ProcessArchitecture switch
+            {
+                Architecture.X86 => "win-x86",
+                Architecture.X64 => "win-x64",
+                Architecture.Arm64 => "win-arm64",
+                _ => null,
+            };
+
+            if (rid is null)
+            {
+                yield break;
+            }
+
+            var relative = Path.Combine("runtimes", rid, "native");
+
+            if (!string.IsNullOrEmpty(assemblyDirectory))
+            {
+                yield return Path.Combine(assemblyDirectory!, relative);
+            }
+
+            if (!string.IsNullOrEmpty(baseDirectory) && !SameDirectory(baseDirectory, assemblyDirectory))
+            {
+                yield return Path.Combine(baseDirectory, relative);
+            }
         }
+
+        private static bool SameDirectory(string? left, string? right) =>
+            string.Equals(
+                left?.TrimEnd(Path.DirectorySeparatorChar),
+                right?.TrimEnd(Path.DirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase);
 
         /// <summary>Gets a value indicating whether this pseudoconsole came from conpty.dll.</summary>
         public bool IsOutOfBand => this.outOfBand;
