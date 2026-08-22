@@ -64,8 +64,15 @@
 
   <ItemGroup>
     <!-- buildTransitive: ConPTY ships its host-staging logic under build/, which imports for a DIRECT
-         reference only — so a CONSUMER of this package must be given it. See the file. -->
-    <None Include="build/Porta.Pty.targets" Pack="true" PackagePath="buildTransitive/" />
+         reference only — so a CONSUMER of this package must be given it. See the file.
+
+         The packaged NAME has to be $(PackageId): NuGet auto-imports
+         buildTransitive/{PackageId}.targets and ignores every other name. That is the same string
+         as this file's own name here, so the package is unchanged — but only as long as the two
+         agree. Pack under any other id (-p:PackageId, as a repackaging fork does) and the file
+         ships inert: it restores, it builds, and ConPTY is simply never staged, leaving a silent
+         fall back to conhost. NU5131 warns about exactly this. -->
+    <None Include="build/Porta.Pty.targets" Pack="true" PackagePath="buildTransitive/$(PackageId).targets" />
   </ItemGroup>
 
   <ItemGroup>
