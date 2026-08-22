@@ -4,102 +4,119 @@
 namespace Porta.Pty.Windows
 {
     using System;
+    using System.ComponentModel;
     using System.Runtime.InteropServices;
-    using Vanara.PInvoke;
-    using static Vanara.PInvoke.Kernel32;
+    using System.Runtime.Versioning;
+    // global:: is required, not stylistic. This namespace is Porta.Pty.WINDOWS, so an unqualified
+    // `using Windows.Win32` binds relative to it and looks for Porta.Pty.Windows.Windows.Win32.
+    // The alternative is moving the usings outside the namespace block, which is what Sylinko's fork
+    // does by using file-scoped namespaces; keeping them inside preserves this file's upstream shape.
+    using global::Windows.Win32;
+    using global::Windows.Win32.System.Threading;
 
+    /// <remarks>
+    /// Windows-only, and specifically Windows 10 1809 or later: ConPTY does not exist before that, and
+    /// <see cref="NativeMethods.IsPseudoConsoleSupported"/> is the runtime gate that says so with a
+    /// PlatformNotSupportedException naming the version.
+    ///
+    /// The VERSION in the annotation is not decoration. CsWin32's generated entry points carry their
+    /// own floors (windows5.1.2600 for the job-object calls, windows6.0.6000 for the attribute-list
+    /// ones), and a bare "windows" annotation does not satisfy them -- the platform-compatibility
+    /// analyzer reported 22 warnings saying exactly that. Stating the real minimum satisfies all of
+    /// them truthfully, where suppressing would have hidden a genuine question about which Windows
+    /// versions this library supports.
+    /// </remarks>
+    [SupportedOSPlatform("windows10.0.17763")]
     internal static class NativeMethods
     {
         public const int S_OK = 0;
 
-        // PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE value
-        // This is ProcThreadAttributePseudoConsole (22) | PROC_THREAD_ATTRIBUTE_INPUT (0x20000)
-        private const int PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x20016; // 22 | 0x20000
+        /// <summary>
+        /// ProcThreadAttributePseudoConsole (22) | PROC_THREAD_ATTRIBUTE_INPUT (0x20000).
+        /// Spelled out rather than taken from a generated enum: this is a Windows 10 1809 addition and
+        /// neither Vanara's PROC_THREAD_ATTRIBUTE nor CsWin32's projection carries it.
+        /// </summary>
+        private const nuint PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x20016;
 
+        /// <summary>
+        /// Whether this Windows build has ConPTY at all. Probed by looking for the entry point rather
+        /// than by version number: a version check would have to be maintained, and this cannot be
+        /// wrong. NativeLibrary replaces the LoadLibrary/GetProcAddress pair the Vanara version used,
+        /// so neither needs generating.
+        /// </summary>
         private static readonly Lazy<bool> IsPseudoConsoleSupportedLazy = new Lazy<bool>(
-            () =>
-            {
-                var hLibrary = LoadLibrary("kernel32.dll");
-                return !hLibrary.IsInvalid && GetProcAddress(hLibrary, "CreatePseudoConsole") != IntPtr.Zero;
-            },
+            () => NativeLibrary.TryLoad("kernel32.dll", out IntPtr kernel32)
+                  && NativeLibrary.TryGetExport(kernel32, "CreatePseudoConsole", out _),
             isThreadSafe: true);
 
         internal static bool IsPseudoConsoleSupported => IsPseudoConsoleSupportedLazy.Value;
 
-        // Extension method to initialize STARTUPINFOEX with PseudoConsole attribute
-        internal static void InitAttributeListAttachedToConPTY(ref this STARTUPINFOEX startupInfo, SafeHPCON pseudoConsoleHandle)
+        /// <summary>
+        /// Builds the process-thread attribute list that attaches a spawned process to a pseudoconsole.
+        /// </summary>
+        /// <param name="startupInfo">The startup info to populate.</param>
+        /// <param name="pseudoConsoleHandle">
+        /// The raw HPCON. Raw rather than a typed handle because the pseudoconsole may come from either
+        /// ConPTY implementation, and only the in-box one produces a handle type the generated interop
+        /// knows about. The attribute value was always a pointer-sized blob underneath.
+        /// </param>
+        internal static unsafe void InitAttributeListAttachedToConPTY(
+            ref this STARTUPINFOEXW startupInfo, IntPtr pseudoConsoleHandle)
         {
-            startupInfo.StartupInfo.cb = (uint)Marshal.SizeOf<STARTUPINFOEX>();
-            startupInfo.StartupInfo.dwFlags = STARTF.STARTF_USESTDHANDLES;
+            startupInfo.StartupInfo.cb = (uint)Marshal.SizeOf<STARTUPINFOEXW>();
+            startupInfo.StartupInfo.dwFlags = STARTUPINFOW_FLAGS.STARTF_USESTDHANDLES;
 
-            const int AttributeCount = 1;
-            SizeT size = SizeT.Zero;
+            const uint AttributeCount = 1;
+            nuint size = 0;
 
-            // Create the appropriately sized thread attribute list
-            bool wasInitialized = InitializeProcThreadAttributeList(IntPtr.Zero, AttributeCount, 0, ref size);
-            if (wasInitialized || size == SizeT.Zero)
+            // The first call is EXPECTED to fail; it is how the required size is obtained. Succeeding
+            // here, or reporting a zero size, means something is wrong rather than that there is
+            // nothing to do.
+            PInvoke.InitializeProcThreadAttributeList(default, AttributeCount, 0, &size);
+            if (size == 0)
             {
                 throw new InvalidOperationException(
                     $"Couldn't get the size of the process attribute list for {AttributeCount} attributes",
-                    new System.ComponentModel.Win32Exception());
+                    new Win32Exception());
             }
 
-            startupInfo.lpAttributeList = Marshal.AllocHGlobal((int)size);
-            if (startupInfo.lpAttributeList == IntPtr.Zero)
+            var list = (LPPROC_THREAD_ATTRIBUTE_LIST)(void*)Marshal.AllocHGlobal((int)size);
+            startupInfo.lpAttributeList = list;
+
+            if (!PInvoke.InitializeProcThreadAttributeList(list, AttributeCount, 0, &size))
             {
-                throw new OutOfMemoryException("Couldn't reserve space for a new process attribute list");
+                Marshal.FreeHGlobal((IntPtr)(void*)list);
+                startupInfo.lpAttributeList = default;
+                throw new InvalidOperationException(
+                    "Couldn't create new process attribute list", new Win32Exception());
             }
 
-            // Set startup info's attribute list & initialize it
-            wasInitialized = InitializeProcThreadAttributeList(startupInfo.lpAttributeList, AttributeCount, 0, ref size);
-            if (!wasInitialized)
+            if (!PInvoke.UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+                    (void*)pseudoConsoleHandle,
+                    (nuint)IntPtr.Size,
+                    null,
+                    null))
             {
-                throw new InvalidOperationException("Couldn't create new process attribute list", new System.ComponentModel.Win32Exception());
-            }
-
-            // Set thread attribute list's Pseudo Console to the specified ConPTY
-            // Note: We use our own P/Invoke for UpdateProcThreadAttribute because:
-            // 1. Vanara's PROC_THREAD_ATTRIBUTE enum doesn't include PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE (newer Win10 feature)
-            // 2. Vanara's UpdateProcThreadAttribute doesn't accept IntPtr for custom attribute values
-            wasInitialized = UpdateProcThreadAttributeCustom(
-                startupInfo.lpAttributeList,
-                0,
-                new IntPtr(PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE),
-                pseudoConsoleHandle.DangerousGetHandle(),
-                (SizeT)Marshal.SizeOf<IntPtr>(),
-                IntPtr.Zero,
-                IntPtr.Zero);
-
-            if (!wasInitialized)
-            {
-                throw new InvalidOperationException("Couldn't update process attribute list", new System.ComponentModel.Win32Exception());
+                // Capture the error BEFORE freeing: DeleteProcThreadAttributeList and FreeHGlobal both
+                // clobber the last-error value, so constructing the exception afterwards reports the
+                // cleanup's success instead of the failure being reported.
+                var failure = new Win32Exception();
+                startupInfo.FreeAttributeList();
+                throw new InvalidOperationException("Couldn't update process attribute list", failure);
             }
         }
 
-        internal static void FreeAttributeList(ref this STARTUPINFOEX startupInfo)
+        internal static unsafe void FreeAttributeList(ref this STARTUPINFOEXW startupInfo)
         {
-            if (startupInfo.lpAttributeList != IntPtr.Zero)
+            if (startupInfo.lpAttributeList != default)
             {
-                DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
-                Marshal.FreeHGlobal(startupInfo.lpAttributeList);
-                startupInfo.lpAttributeList = IntPtr.Zero;
+                PInvoke.DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
+                Marshal.FreeHGlobal((IntPtr)(void*)startupInfo.lpAttributeList);
+                startupInfo.lpAttributeList = default;
             }
         }
-
-        /// <summary>
-        /// Custom P/Invoke for UpdateProcThreadAttribute.
-        /// Required because Vanara's version doesn't support PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
-        /// which is a newer Windows 10 feature not yet in Vanara's PROC_THREAD_ATTRIBUTE enum.
-        /// </summary>
-        [DllImport("kernel32.dll", EntryPoint = "UpdateProcThreadAttribute", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool UpdateProcThreadAttributeCustom(
-            IntPtr lpAttributeList,
-            uint dwFlags,
-            IntPtr Attribute,
-            IntPtr lpValue,
-            SizeT cbSize,
-            IntPtr lpPreviousValue,
-            IntPtr lpReturnSize);
     }
 }

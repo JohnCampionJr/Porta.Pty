@@ -416,3 +416,9 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Native shim build output. build.sh writes here and CI rebuilds it per platform; a checked-in
+# slice is one architecture pretending to be the answer, and it went in by accident with the net10
+# change.
+src/Porta.Pty.Native/output/
+src/Porta.Pty.Native/build/
