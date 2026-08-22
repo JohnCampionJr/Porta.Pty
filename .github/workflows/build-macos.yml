@@ -51,9 +51,14 @@ jobs:
     - name: Copy native library for tests
       run: |
         RID=${{ steps.rid.outputs.rid }}
-        # Copy to a location the runtime can find for tests
-        cp src/Porta.Pty.Native/output/runtimes/${RID}/native/libporta_pty.dylib \
-           src/Porta.Pty.Tests/bin/Debug/net6.0/ || true
+        # Located, not hard-coded. The test project is RID-specific now (so the ConPTY natives land in
+        # the app root on Windows), which moved its output from bin/Debug/<tfm>/ to
+        # bin/Debug/<tfm>/<rid>/ — a fixed path silently copies into the wrong directory, and the run
+        # then fails much later as DllNotFoundException with nothing pointing back here.
+        out=$(dirname "$(find src/Porta.Pty.Tests/bin/Debug -name 'Porta.Pty.Tests.dll' | head -1)")
+        [ -n "$out" ] || { echo "::error::test output not found"; exit 1; }
+        cp src/Porta.Pty.Native/output/runtimes/${RID}/native/libporta_pty.dylib "$out/"
+        echo "staged shim into $out"
 
     - name: Test
       run: dotnet test --no-build --verbosity normal src/Porta.Pty.sln
