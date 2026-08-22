@@ -8,6 +8,7 @@ namespace Porta.Pty.Windows
     using System.ComponentModel;
     using System.Runtime.InteropServices;
     using System.IO;
+    using System.Diagnostics.CodeAnalysis;
     using System.Reflection;
     using System.Runtime.Versioning;
     // global:: is required, not stylistic. This namespace is Porta.Pty.WINDOWS, so an unqualified
@@ -188,26 +189,43 @@ namespace Porta.Pty.Windows
             return false;
         }
 
+        /// <summary>
+        /// Gets the directory containing this assembly, or <see langword="null"/> when there isn't one.
+        /// </summary>
+        /// <remarks>
+        /// Split out so the IL3000 suppression covers only this, and so it is not applied to an iterator
+        /// (where it would sit on the method rather than the generated state machine that does the work).
+        /// The warning's advice — use <see cref="AppContext.BaseDirectory"/> — is what the caller already
+        /// falls back to; it cannot be the only answer here, because the imports resolve against the
+        /// ASSEMBLY directory and the two differ for a plugin or a custom load context.
+        /// </remarks>
+        [UnconditionalSuppressMessage(
+            "SingleFile",
+            "IL3000:Avoid accessing Assembly file path when publishing as a single file",
+            Justification = "An empty Location is the single-file and AOT case, and is handled: the " +
+                            "caller falls back to AppContext.BaseDirectory. Verified by publishing the " +
+                            "sample with PublishAot on win-arm64 and win-x64 — both spawn correctly.")]
+        private static string? AssemblyDirectory()
+        {
+            try
+            {
+                var location = typeof(PseudoConsole).Assembly.Location;
+                return string.IsNullOrEmpty(location) ? null : Path.GetDirectoryName(location);
+            }
+            catch (Exception)
+            {
+                // Some hosts refuse Location outright; the base directory is the fallback either way.
+                return null;
+            }
+        }
+
         private static IEnumerable<string> ProbeDirectories()
         {
             // The assembly's own directory first — that is what DllImportSearchPath.AssemblyDirectory
             // resolves against, so it is the only candidate whose answer is guaranteed to match the
-            // import. Location is empty for single-file and native AOT, where the base directory is the
-            // right answer anyway.
-            string? assemblyDirectory = null;
-
-            try
-            {
-                var location = typeof(PseudoConsole).Assembly.Location;
-                if (!string.IsNullOrEmpty(location))
-                {
-                    assemblyDirectory = Path.GetDirectoryName(location);
-                }
-            }
-            catch (Exception)
-            {
-                // Some hosts refuse Location outright; fall through to the base directory.
-            }
+            // import. Empty under single-file and native AOT, where the base directory is the right
+            // answer anyway.
+            var assemblyDirectory = AssemblyDirectory();
 
             if (!string.IsNullOrEmpty(assemblyDirectory))
             {
