@@ -8,16 +8,20 @@ name: Publish Nuget Prerelease
 # cannot observe any packaging behaviour at all. scripts/verify-consumer.sh and
 # Verify-ConPtyConsumerStaging.ps1 close most of it from a LOCAL feed; a prerelease closes the rest.
 #
-# The only difference from PublishNuget.yml is the version. Everything else is deliberately identical,
-# because a prerelease that is built differently from the release is not a test of the release.
+# The only differences from PublishNuget.yml are the version and fail-if-exists. Everything else is
+# deliberately identical, because a prerelease that is built differently from the release is not a
+# test of the release.
+#
+# The version auto-increments -- 2.0.0-rc001, rc002, ... -- so this can be run as many times as it
+# takes without picking a number by hand or colliding with one already spent.
 
 on:
   workflow_dispatch:
     inputs:
-      suffix:
-        description: 'Prerelease label appended to the version in Porta.Pty.csproj (2.0.0 -> 2.0.0-pre)'
+      label:
+        description: 'Prerelease label. The counter is per-label and advances on its own (2.0.0 -> 2.0.0-rc001, rc002, ...)'
         required: true
-        default: 'pre'
+        default: 'rc'
         type: string
 
 jobs:
@@ -144,19 +148,25 @@ jobs:
       # never be published for a version the branch does not actually declare -- which is the one way
       # a "test the package before the real push" step could test the wrong thing entirely.
       #
-      # PackageVersion, not Version: it moves the package version alone and leaves AssemblyVersion and
-      # FileVersion where the csproj put them, so the prerelease assembly is binary-identical to the
-      # release one. Version would drag all three along and make them different builds.
-      - name: Compute the prerelease version
+      # The counter comes from nuget.org rather than from github.run_number, which would skip and
+      # would restart at nothing to do with the versions actually published. The question being asked
+      # is "what is the next unused 2.0.0-rc*", and only nuget.org knows that.
+      #
+      # rc001, NOT rc.001. SemVer forbids leading zeroes in a DOTTED numeric identifier, and NuGet
+      # enforces it: `2.0.0-rc.001` fails to pack outright with "is not a valid version string".
+      # Without the dot the whole label is one alphanumeric identifier, which is legal and which also
+      # keeps the padding meaningful -- these sort lexically, so rc009 < rc010 only because of it.
+      - name: Compute the next prerelease version
         id: version
         run: |
           set -euo pipefail
-          suffix='${{ inputs.suffix }}'
+          label='${{ inputs.label }}'
 
-          # NuGet prerelease labels are alphanumerics, dots and hyphens. Rejecting here beats a pack
-          # that succeeds and a push that fails after twelve minutes of native builds.
-          if ! printf '%s' "$suffix" | grep -qE '^[0-9A-Za-z.-]+$'; then
-            echo "::error::'$suffix' is not a valid prerelease label (use A-Z a-z 0-9 . -)"
+          # Must not END in a digit, or the label and the counter run together and the next lookup
+          # cannot tell where one stops: rc1 + 002 is rc1002, which reads back as label rc, counter
+          # 1002. Rejecting here beats discovering it two prereleases later.
+          if ! printf '%s' "$label" | grep -qE '^[0-9A-Za-z-]*[A-Za-z-]$'; then
+            echo "::error::'$label' must be alphanumerics or hyphens and must not end in a digit"
             exit 1
           fi
 
@@ -167,15 +177,49 @@ jobs:
             exit 1
           fi
 
-          echo "version=$base-$suffix" >> "$GITHUB_OUTPUT"
-          echo "Publishing $base-$suffix (release version in $csproj is $base)"
+          # Flat container, which lists every version of the id in lowercase. A 404 means the id has
+          # never been published at all, which is a legitimate answer of "none". Anything else is the
+          # API failing, and guessing 001 through a failed lookup would republish over real versions.
+          index="https://api.nuget.org/v3-flatcontainer/porta.pty/index.json"
+          status=$(curl -sS -o versions.json -w '%{http_code}' "$index" || echo 000)
+
+          case "$status" in
+            200) ;;
+            404) echo '{"versions":[]}' > versions.json ;;
+            *) echo "::error::nuget.org returned $status for $index"; exit 1 ;;
+          esac
+
+          # Prefix match plus an all-digits tail, rather than a regex built out of $base -- the base
+          # version contains dots, and the escaping is one more thing to get wrong silently. Unlisted
+          # versions are still listed here, which is correct: they occupy the number either way.
+          prefix="$base-$label"
+          latest=$(jq -r '.versions[]' versions.json \
+            | awk -v p="$prefix" 'index($0, p) == 1 {
+                  tail = substr($0, length(p) + 1)
+                  if (tail ~ /^[0-9]+$/) { print tail + 0 }
+                }' \
+            | sort -n | tail -1)
+
+          # 10# forces base 10. Without it $(( 008 + 1 )) is a fatal "value too great for base",
+          # because the padding that makes these sort makes them look octal to the shell.
+          next=$(printf '%03d' "$(( 10#${latest:-0} + 1 ))")
+
+          echo "version=$prefix$next" >> "$GITHUB_OUTPUT"
+          echo "release version in $csproj: $base"
+          echo "highest published $prefix*: ${latest:-none}"
+          echo "publishing: $prefix$next"
 
       - name: Restore dependencies
         run: dotnet restore src/Porta.Pty.sln
 
-      # PackageVersion is passed to BUILD as well as pack, because GeneratePackageOnBuild is on: the
-      # build produces a package too, and `pack --no-build` reuses what the build laid down. Passing it
-      # to only one of the two is how the two disagree.
+      # PackageVersion, NOT Version: it moves the package version alone and leaves AssemblyVersion and
+      # FileVersion where the csproj put them, so the prerelease assembly is binary-identical to the
+      # release one. Version would drag all three along and make them different builds -- which would
+      # mean the thing being tested is not the thing being shipped.
+      #
+      # Passed to BUILD as well as pack, because GeneratePackageOnBuild is on: the build produces a
+      # package too, and `pack --no-build` reuses what the build laid down. Passing it to only one of
+      # the two is how the two disagree.
       - name: Build
         run: dotnet build src/Porta.Pty.sln -c Release --no-restore -p:PackageVersion=${{ steps.version.outputs.version }}
 
@@ -190,21 +234,31 @@ jobs:
           echo "Package contents:"
           unzip -l packages/*.nupkg | grep -E "(runtimes|\.so|\.dylib)"
 
+      # fail-if-exists is TRUE here, where PublishNuget.yml has it false, and the difference matters
+      # precisely because this workflow picks its own version. The counter is read from nuget.org, and
+      # nuget.org takes a minute or two to index a push -- so two runs in quick succession can both
+      # compute the same number. Swallowing that would report a successful publish of a package that
+      # was never uploaded, and the whole point here is to test what actually got published. Failing
+      # loudly costs a re-run, by which time the index has caught up.
       - name: Publish NuGet and symbols
         id: nuget-push
         uses: edumserrano/nuget-push@v1
         with:
           api-key: '${{ secrets.NUGET_KEY }}'
           working-directory: 'packages'
-          fail-if-exists: false
+          fail-if-exists: true
 
       - name: Summary
         run: |
-          echo "### Published \`Porta.Pty ${{ steps.version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Consume it with an explicit version -- NuGet will not resolve a prerelease otherwise:" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo 'dotnet add package Porta.Pty --version ${{ steps.version.outputs.version }}' >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "A prerelease version can only be pushed once. Re-run with a different suffix (\`pre.2\`, \`rc.1\`) to publish again." >> "$GITHUB_STEP_SUMMARY"
+          version='${{ steps.version.outputs.version }}'
+          {
+            echo "### Published \`Porta.Pty $version\`"
+            echo
+            echo "Consume it with an explicit version -- NuGet does not resolve prereleases otherwise:"
+            echo '```'
+            echo "dotnet add package Porta.Pty --version $version"
+            echo '```'
+            echo
+            echo "The next run of this workflow takes the next number on its own. It may need a minute"
+            echo "or two first: the counter comes from nuget.org, which does not index a push instantly."
+          } >> "$GITHUB_STEP_SUMMARY"
