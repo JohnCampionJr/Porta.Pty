@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <!-- A RID is required for the ConPTY natives to be staged at all on Windows. Defaulting to the
+         host's keeps a plain `dotnet run` here honest about what a real consumer gets. -->
+    <UseCurrentRuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">true</UseCurrentRuntimeIdentifier>
+  </PropertyGroup>
+
+  <!--
+    Two ways to reference the library, and the difference is the entire point of this sample.
+
+    A ProjectReference cannot see any packaging defect: it bypasses the .nupkg, so buildTransitive/
+    never applies, native assets are not resolved through runtimes/, and every ConPTY staging bug this
+    repo has hit is invisible. The verify scripts therefore pack first and pass PortaPtyPackageVersion,
+    which swaps this to a real PackageReference against a local feed — the same path a consumer takes.
+
+    The ProjectReference default is just so the sample builds in a plain clone with no feed set up.
+  -->
+  <ItemGroup Condition="'$(PortaPtyPackageVersion)' == ''">
+    <ProjectReference Include="../../src/Porta.Pty/Porta.Pty.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(PortaPtyPackageVersion)' != ''">
+    <PackageReference Include="Porta.Pty" Version="$(PortaPtyPackageVersion)" />
+  </ItemGroup>
+
+</Project>

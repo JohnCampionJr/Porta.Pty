@@ -74,23 +74,65 @@
 
   <!-- Native runtime libraries for each platform -->
   <!-- These are built from src/Porta.Pty.Native and placed in the runtimes folder -->
+  <!--
+    The POSIX shim, in its two roles.
+
+    Each RID appears EXACTLY ONCE, which is the whole point of the shape below. The host's shim needs
+    a second role beyond packing — it must also be copied to the output of PROJECT-reference consumers
+    (the test project, samples/Porta.Pty.Demo), which get no .nupkg and so resolve nothing from
+    runtimes/. That used to be done by hand in the CI workflows, with a literal path that silently
+    pointed at a directory that no longer existed once the test output went RID-specific; the run then
+    failed as DllNotFoundException naming nothing.
+
+    The obvious fix — a second Content item pointing at the same file with Pack="false" — is a trap,
+    and it packs cleanly while being badly wrong: two items with the same Identity are reconciled by
+    NuGet, Pack="false" wins, and the package loses that RID. Because the RID chosen is the BUILD
+    HOST'S, the package is then always missing exactly the platform it was built on, and every other
+    platform's shim is present, so the listing looks plausible. Measured: packing on osx-arm64 produced
+    a package containing osx-x64 alone.
+
+    Hence one item per RID, and the host's is Content rather than None. Content is what flows down a
+    ProjectReference into the consumer's output; None does not.
+  -->
+  <PropertyGroup>
+    <_PortaPtyNativeRoot>$(MSBuildThisFileDirectory)../Porta.Pty.Native/output/runtimes/</_PortaPtyNativeRoot>
+    <_PortaPtyShimRid Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</_PortaPtyShimRid>
+    <_PortaPtyShimRid Condition="'$(_PortaPtyShimRid)' == ''">$(NETCoreSdkRuntimeIdentifier)</_PortaPtyShimRid>
+    <_PortaPtyShimName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libporta_pty.dylib</_PortaPtyShimName>
+    <_PortaPtyShimName Condition="$([MSBuild]::IsOSPlatform('Linux'))">libporta_pty.so</_PortaPtyShimName>
+    <_PortaPtyShimPath>$(_PortaPtyNativeRoot)$(_PortaPtyShimRid)/native/$(_PortaPtyShimName)</_PortaPtyShimPath>
+  </PropertyGroup>
+
   <ItemGroup>
-    <None Include="../Porta.Pty.Native/output/runtimes/linux-x64/native/libporta_pty.so" 
-          Pack="true" 
-          PackagePath="runtimes/linux-x64/native/" 
-          Condition="Exists('../Porta.Pty.Native/output/runtimes/linux-x64/native/libporta_pty.so')" />
-    <None Include="../Porta.Pty.Native/output/runtimes/linux-arm64/native/libporta_pty.so" 
-          Pack="true" 
-          PackagePath="runtimes/linux-arm64/native/" 
-          Condition="Exists('../Porta.Pty.Native/output/runtimes/linux-arm64/native/libporta_pty.so')" />
-    <None Include="../Porta.Pty.Native/output/runtimes/osx-x64/native/libporta_pty.dylib" 
-          Pack="true" 
-          PackagePath="runtimes/osx-x64/native/" 
-          Condition="Exists('../Porta.Pty.Native/output/runtimes/osx-x64/native/libporta_pty.dylib')" />
-    <None Include="../Porta.Pty.Native/output/runtimes/osx-arm64/native/libporta_pty.dylib" 
-          Pack="true" 
-          PackagePath="runtimes/osx-arm64/native/" 
-          Condition="Exists('../Porta.Pty.Native/output/runtimes/osx-arm64/native/libporta_pty.dylib')" />
+    <!-- Every RID except the build host's. Exists() throughout, so a clone that has not run
+         src/Porta.Pty.Native/build.sh still builds — the consequence being that a package can be
+         produced with no shim at all and no warning, which is why scripts/verify-consumer.sh asserts
+         on the packed contents rather than trusting the pack to have said something. -->
+    <None Include="$(_PortaPtyNativeRoot)linux-x64/native/libporta_pty.so"
+          Pack="true"
+          PackagePath="runtimes/linux-x64/native/"
+          Condition="'$(_PortaPtyShimRid)' != 'linux-x64' And Exists('$(_PortaPtyNativeRoot)linux-x64/native/libporta_pty.so')" />
+    <None Include="$(_PortaPtyNativeRoot)linux-arm64/native/libporta_pty.so"
+          Pack="true"
+          PackagePath="runtimes/linux-arm64/native/"
+          Condition="'$(_PortaPtyShimRid)' != 'linux-arm64' And Exists('$(_PortaPtyNativeRoot)linux-arm64/native/libporta_pty.so')" />
+    <None Include="$(_PortaPtyNativeRoot)osx-x64/native/libporta_pty.dylib"
+          Pack="true"
+          PackagePath="runtimes/osx-x64/native/"
+          Condition="'$(_PortaPtyShimRid)' != 'osx-x64' And Exists('$(_PortaPtyNativeRoot)osx-x64/native/libporta_pty.dylib')" />
+    <None Include="$(_PortaPtyNativeRoot)osx-arm64/native/libporta_pty.dylib"
+          Pack="true"
+          PackagePath="runtimes/osx-arm64/native/"
+          Condition="'$(_PortaPtyShimRid)' != 'osx-arm64' And Exists('$(_PortaPtyNativeRoot)osx-arm64/native/libporta_pty.dylib')" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(_PortaPtyShimName)' != '' And Exists('$(_PortaPtyShimPath)')">
+    <!-- The host's shim, carrying BOTH roles in one item so the file is declared exactly once. -->
+    <Content Include="$(_PortaPtyShimPath)"
+             Pack="true"
+             PackagePath="runtimes/$(_PortaPtyShimRid)/native/"
+             Link="$(_PortaPtyShimName)"
+             CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
