@@ -33,6 +33,12 @@ namespace Porta.Pty.Linux
         }
 
         /// <inheritdoc/>
+        protected override bool Close(int controller)
+        {
+            return pty_close(controller) != -1;
+        }
+
+        /// <inheritdoc/>
         protected override bool WaitPid(int pid, ref int status)
         {
             return pty_waitpid(pid, ref status, 0) != -1;
