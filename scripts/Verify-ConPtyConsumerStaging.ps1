@@ -23,14 +23,22 @@
     box: an x64 process runs there under emulation and needs the x64 host, and that is the case a
     flat copy silently broke.
 
+.PARAMETER Aot
+    Also publish the consumer with PublishAot and run that. This is the interop question rather than the
+    packaging one: CsWin32 source-generates its P/Invoke, so there is nothing for the trimmer to fail to
+    see, whereas the Vanara wrappers it replaced went through paths that AOT does not support. Needs the
+    MSVC toolchain (Desktop C++ workload) on the box.
+
 .EXAMPLE
     ./scripts/Verify-ConPtyConsumerStaging.ps1 -Rid win-arm64
     ./scripts/Verify-ConPtyConsumerStaging.ps1 -Rid win-x64
+    ./scripts/Verify-ConPtyConsumerStaging.ps1 -Rid win-arm64 -Aot
 #>
 [CmdletBinding()]
 param(
     [string] $Rid = 'win-arm64',
     [string] $Version = '1.0.0-verify',
+    [switch] $Aot,
     [switch] $KeepScratch
 )
 
@@ -142,6 +150,31 @@ try {
     else {
         Write-Host "  SKIPPED the round trip - a $ridArch binary cannot run on a $hostArch host" -ForegroundColor Yellow
         Write-Host "  (staging above was still verified)" -ForegroundColor Yellow
+    }
+
+    if ($Aot) {
+        # Native AOT is a different question from packaging: it is about whether the interop survives
+        # having no JIT and no reflection fallback. Worth checking separately because the failure it
+        # produces is not a build error -- it publishes fine and then throws at the spawn.
+        Write-Host "  publishing with PublishAot:" -ForegroundColor Cyan
+        $aotOut = Join-Path $consumer 'aot'
+        & dotnet publish $demo -p:PortaPtyPackageVersion=$Version -p:RuntimeIdentifier=$Rid `
+            -p:PublishAot=true --packages $packages -c Release -o $aotOut --nologo -v q
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "    AOT publish failed" -ForegroundColor Red
+            $failures += "AOT publish failed"
+        }
+        elseif ($canRun) {
+            Assert-Staged -Root $aotOut -Label 'aot'
+            & (Join-Path $aotOut 'Porta.Pty.Demo.exe')
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "    AOT demo exited $LASTEXITCODE" -ForegroundColor Red
+                $failures += "AOT round trip failed (exit $LASTEXITCODE)"
+            }
+        }
+        else {
+            Write-Host "    published, not run - $ridArch cannot run on $hostArch" -ForegroundColor Yellow
+        }
     }
 }
 finally {
