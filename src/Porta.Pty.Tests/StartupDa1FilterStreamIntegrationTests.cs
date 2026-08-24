@@ -68,47 +68,6 @@ namespace Porta.Pty.Tests
                 "emulator must not be asked it a second time — its reply would reach the child as input.");
         }
 
-        [TestMethod]
-        public async Task TheStartupQueryReachesAConsumerThatAnswersForItself()
-        {
-            // The mirror of the test above, and the reason the two halves are decided by one value.
-            // A terminal emulator turns the answer off so it can advertise its own capabilities
-            // instead of the canned "VT100 with Advanced Video Option" this library would claim --
-            // which only works if the question reaches it.
-            if (!OperatingSystem.IsWindows())
-            {
-                Assert.Inconclusive("ConPTY, and so this query, is Windows-only.");
-            }
-
-            var implementation = PtyProvider.PseudoConsoleImplementation;
-
-            if (implementation != "oob")
-            {
-                Assert.Inconclusive(
-                    $"Only out-of-band ConPTY asks DA1 on startup; this process resolved '{implementation}'.");
-            }
-
-            var options = new PtyOptions
-            {
-                Name = "cmd.exe",
-                App = "cmd.exe",
-                CommandLine = ["/c", "echo done"],
-                Cols = 120,
-                Rows = 30,
-                Cwd = Environment.CurrentDirectory,
-                AnswerDeviceAttributes = false,
-            };
-
-            using var cts = new CancellationTokenSource(ReadTimeoutMs);
-            using var connection = await PtyProvider.SpawnAsync(options, cts.Token);
-
-            var output = await ReadUntilAsync(connection.ReaderStream, Da1Query, cts.Token);
-
-            output.Should().Contain(
-                Da1Query,
-                "a consumer that has taken the handshake on itself has to be able to see it asked.");
-        }
-
         /// <summary>
         /// Reads until <paramref name="marker"/> shows up or the token fires, and returns everything
         /// seen. Bounded by the marker rather than by a byte count so the whole startup burst is

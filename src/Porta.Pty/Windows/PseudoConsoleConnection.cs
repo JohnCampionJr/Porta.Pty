@@ -37,12 +37,7 @@ namespace Porta.Pty.Windows
         /// Initializes a new instance of the <see cref="PseudoConsoleConnection"/> class.
         /// </summary>
         /// <param name="handles">The set of handles associated with the pseudoconsole.</param>
-        /// <param name="hideStartupDa1Query">
-        /// Whether ConPTY's startup Primary Device Attributes query should be removed from the output.
-        /// True exactly when this library answers that query itself, so that the consumer is never
-        /// asked something already answered. See <see cref="PtyOptions.AnswerDeviceAttributes"/>.
-        /// </param>
-        public PseudoConsoleConnection(PseudoConsoleConnectionHandles handles, bool hideStartupDa1Query = false)
+        public PseudoConsoleConnection(PseudoConsoleConnectionHandles handles)
         {
             // Use FileStream with the pipe handles for direct access
             // This avoids the buffering issues that can occur with AnonymousPipeClientStream
@@ -52,11 +47,12 @@ namespace Porta.Pty.Windows
                 bufferSize: 0,  // No buffering
                 isAsync: false);
 
-            // The other half of PtyProvider.AnswerDeviceAttributes, which is why the caller decides
-            // both with one value: having answered ConPTY's startup question for the consumer, we owe
-            // it never being asked. A consumer that is a terminal emulator would otherwise answer it
-            // too, and the surplus answer reaches the child as keyboard input.
-            this.ReaderStream = hideStartupDa1Query
+            // Paired with PtyProvider.AnswerDeviceAttributes, and gated on the same condition it is:
+            // out-of-band ConPTY is the only one that asks, we answer for the consumer, and so the
+            // consumer must not see the question. A consumer that is a terminal emulator would
+            // otherwise answer it too, and the second answer reaches the child as keyboard input.
+            // Keep the two in step: whoever stops answering must stop hiding the query as well.
+            this.ReaderStream = handles.PseudoConsoleHandle.IsOutOfBand
                 ? new StartupDa1FilterStream(reader)
                 : reader;
 
