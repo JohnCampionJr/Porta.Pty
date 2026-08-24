@@ -124,6 +124,18 @@ namespace Porta.Pty.Tests
         }
 
         [TestMethod]
+        public void StopsLookingAfterTheStartupWindow_EvenWhenOneReadSpansIt()
+        {
+            // The window is on where the query STARTS, not on which read it lands in. With a caller
+            // buffer big enough to take the whole thing at once, a bound applied per-read instead of
+            // per-offset would still strip this one -- and a query this late is the child's.
+            var filler = new string('x', 70 * 1024);
+            var read = Drain(Chunks(filler + Da1Query), bufferSize: 128 * 1024);
+
+            read.Should().Be(filler + Da1Query);
+        }
+
+        [TestMethod]
         public async Task RemovesTheStartupQuery_ReadingAsynchronously()
         {
             // The consumer this was written for reads with ReadAsync, so the async path is not a

@@ -62,6 +62,12 @@ namespace Porta.Pty.Tests
 
             var output = await ReadUntilAsync(connection.ReaderStream, "done", cts.Token);
 
+            // Before asserting on what is absent, establish that anything arrived at all. An assertion
+            // that some bytes are missing is satisfied for free by every byte being missing, so a
+            // reader that returned EOF, or a spawn that produced nothing, would pass this test while
+            // proving nothing.
+            output.Should().Contain("done", "the child's own output has to have been read to assert on it");
+
             output.Should().NotContain(
                 Da1Query,
                 "PtyProvider answers ConPTY's startup DA1 itself, so a consumer that is a terminal " +

@@ -273,11 +273,21 @@ namespace Porta.Pty.Windows
                 return total > 0;
             }
 
-            this.scanned += read;
-
             if (this.scanning)
             {
-                var at = IndexOfQuery(this.scratch, total);
+                // Bounded by where the query STARTS, not by which chunk it lands in. A single read
+                // large enough to span the whole window would otherwise strip a query well past it --
+                // and a query that late is the child's, which is exactly what must survive. The slack
+                // of Da1Query.Length - 1 lets a query that starts just inside the window still be
+                // matched whole.
+                var room = ScanBudget - this.scanned;
+                var searchLength = room <= 0
+                    ? 0
+                    : Math.Min(total, room + Da1Query.Length - 1);
+
+                var at = IndexOfQuery(this.scratch, searchLength);
+
+                this.scanned += read;
 
                 if (at >= 0)
                 {

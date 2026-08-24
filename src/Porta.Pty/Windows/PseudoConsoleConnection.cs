@@ -52,7 +52,7 @@ namespace Porta.Pty.Windows
             // consumer must not see the question. A consumer that is a terminal emulator would
             // otherwise answer it too, and the second answer reaches the child as keyboard input.
             // Keep the two in step: whoever stops answering must stop hiding the query as well.
-            this.ReaderStream = handles.PseudoConsoleHandle.IsOutOfBand
+            this.ReaderStream = handles.PseudoConsoleHandle.AsksStartupDeviceAttributes
                 ? new StartupDa1FilterStream(reader)
                 : reader;
 
