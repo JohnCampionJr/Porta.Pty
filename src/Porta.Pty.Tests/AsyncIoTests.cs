@@ -450,11 +450,15 @@ namespace Porta.Pty.Tests
                     connection.Kill();
                 }
 
-                // The blocking Windows path is not promised to reach EOF on Kill alone; disposing
-                // closes its pipe. Teardown must be complete before the next measurement starts.
-                foreach (var connection in connections)
+                // The blocking Windows path is not promised to reach EOF on Kill alone, so close its
+                // pipes now. Async descriptors must remain open until their pending reads observe
+                // child exit; closing first races those reads and turns EOF into EBADF on Linux.
+                if (!useAsyncIo && IsWindows)
                 {
-                    connection.Dispose();
+                    foreach (var connection in connections)
+                    {
+                        connection.Dispose();
+                    }
                 }
 
                 Task pendingReads = Task.WhenAll(pending);
