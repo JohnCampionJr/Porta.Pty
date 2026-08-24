@@ -74,6 +74,33 @@ consumer is never asked it. Only the first `ESC[c`, and only near the start of t
 from the **child** is forwarded the same way, nobody has answered that one, and the consumer is the only
 one who can.
 
+### A terminal should answer for itself: `AnswerDeviceAttributes`
+
+Hiding the query keeps a terminal from answering twice, but it also means this library is the one
+telling the child what terminal it is — and the answer it sends is a canned `ESC[?1;2c`, "VT100 with
+Advanced Video Option". That is a claim about capabilities the transport knows nothing about.
+
+`PtyOptions.AnswerDeviceAttributes` decides who owns the handshake. It defaults to `true`, which is
+right for every consumer that is not a terminal:
+
+```csharp
+// A terminal emulator: advertise your own capabilities, not ours.
+var options = new PtyOptions { App = "cmd.exe", AnswerDeviceAttributes = false };
+```
+
+Setting it `false` stops both halves at once — we neither answer nor hide, so the query reaches the
+consumer and the consumer's own reply is the one ConPTY consumes. Measured to the child's first output:
+
+| `AnswerDeviceAttributes` | consumer answers? | first client output |
+|---|---|---|
+| `true` (default)  | n/a — the query never reaches it | 79 ms  |
+| `false`           | yes, as a terminal does          | 73 ms  |
+| `false`           | no                               | 3080 ms |
+
+The last row is the cost of opting out without following through, and it is the caller's to weigh: a
+consumer that takes the handshake has to actually answer it. Both halves are decided by one value in
+`PtyProvider`, so they cannot drift apart.
+
 ## Adopted, and what a consumer has to know
 
 **Out-of-band is now the default**, and `PtyProvider` answers the handshake itself so that consumers do
@@ -89,6 +116,9 @@ Three things about the answer, each learned by getting it wrong first:
   consumed by a handshake and would reach the child as keyboard input.
 * The query is **removed from the output**, so a consumer that would answer it does not answer it
   twice. Same condition as the answer; whoever stops answering must stop hiding the query too.
+* It is **the default, not the law.** A consumer that is a terminal sets
+  `PtyOptions.AnswerDeviceAttributes = false` and answers with its real capabilities instead of our
+  canned VT100 claim.
 * It is **never fatal.** If the write fails the terminal still works; it just pays the timeout it would
   have paid anyway.
 

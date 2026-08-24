@@ -390,8 +390,13 @@ namespace Porta.Pty.Windows
                         mainThreadHandle!,
                         jobObjectHandle);
 
-                    var result = new PseudoConsoleConnection(connectionOptions);
-                    AnswerDeviceAttributes(result, pseudoConsole);
+                    // ONE decision, used twice, so the two halves cannot drift apart: if we answer
+                    // ConPTY's startup question then the consumer must never be asked it, and if we
+                    // do not answer then the consumer has to see it in order to answer itself.
+                    var answerDeviceAttributes = options.AnswerDeviceAttributes && pseudoConsole.IsOutOfBand;
+
+                    var result = new PseudoConsoleConnection(connectionOptions, answerDeviceAttributes);
+                    AnswerDeviceAttributes(result, answerDeviceAttributes);
                     return Task.FromResult<IPtyConnection>(result);
                 }
                 finally
@@ -429,18 +434,27 @@ namespace Porta.Pty.Windows
         /// the same bytes would not be consumed by a handshake and would reach the child as keyboard
         /// input instead.</para>
         ///
+        /// <para>And only when the consumer has not claimed the handshake for itself — see
+        /// <see cref="PtyOptions.AnswerDeviceAttributes"/>. A terminal emulator can state its real
+        /// capabilities, where the canned answer below can only guess at them.</para>
+        ///
         /// <para>Never fatal. If this write fails the terminal still works; it simply pays the timeout
         /// it would have paid anyway.</para>
         /// </summary>
-        private static void AnswerDeviceAttributes(IPtyConnection connection, PseudoConsole pseudoConsole)
+        /// <param name="connection">The connection whose child is waiting on the handshake.</param>
+        /// <param name="answer">Whether this library is the one answering. Decided by the caller, and
+        /// decided ONCE, because the same answer decides whether the query is hidden from the
+        /// consumer.</param>
+        private static void AnswerDeviceAttributes(IPtyConnection connection, bool answer)
         {
-            if (!pseudoConsole.IsOutOfBand)
+            if (!answer)
             {
                 return;
             }
 
             // "VT100 with Advanced Video Option". What it claims matters far less than that it is a
-            // well-formed DA1 response and that it arrives.
+            // well-formed DA1 response and that it arrives -- and a consumer with something truer to
+            // claim should be answering this itself.
             var reply = Encoding.ASCII.GetBytes("\u001b[?1;2c");
 
             try
