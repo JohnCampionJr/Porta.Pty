@@ -1,20 +1,8 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- net10.0, not netstandard2.0. Upstream targets netstandard2.0 so one package can also serve
-         .NET Framework; this fork targets modern .NET only, so that reach
-         buys nothing and costs plenty. netstandard2.0 pins C# 8, puts every modern interop API behind
-         a polyfill or out of reach entirely, and (the reason it actually matters in THIS codebase)
-         meant the library was never COMPILED against the runtime its consumers run on, in a repo whose
-         POSIX shim exists precisely because a runtime version changed behaviour underneath it (.NET 7
-         turning on W^X by default).
-         It also turns the platform-compatibility analyzer on, which netstandard2.0 cannot run: that is
-         what produced the SupportedOSPlatform annotations on Windows-only P/Invoke that had been
-         compiled into a cross-platform assembly with nothing marking it.
-         If a .NET Framework consumer ever appears, multi-target then. Do not pre-pay for it. -->
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
-    <!-- CsWin32 generates pointer-based interop. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <PropertyGroup>
@@ -29,14 +17,9 @@
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <RepositoryUrl>https://github.com/tomlm/Porta.Pty</RepositoryUrl>
     <Copyright>Tom Laird-McConnell All Rights Reserved</Copyright>
-    <!-- 2.0.0: the target framework moves netstandard2.0 -> net10.0, which is a breaking change for any
-         .NET Framework or netstandard consumer, and Vanara leaves the dependency graph. -->
-    <Version>2.0.0</Version>
-    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <Version>2.0.1</Version>
+    <AssemblyVersion>2.0.1.0</AssemblyVersion>
     <RootNamespace>Porta.Pty</RootNamespace>
-    <!-- PackageTags, not Keyword. Keyword is a Visual C++ project property that NuGet never reads, so
-         the tags had been packing as nothing: the generated nuspec carried no <tags> element at all.
-         Silent, because an absent tag list is a legitimate package. -->
     <PackageTags>pty;conpty;ptty</PackageTags>
     <ContentTargetFolders>content</ContentTargetFolders>
     <IncludeSymbols>true</IncludeSymbols>
@@ -44,37 +27,19 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <!-- Stage the OpenConsole.exe hosts that conpty.dll launches. Out-of-band ConPTY is the default
-         now, so these belong with the library rather than with whoever opts in.
-
-         Without them the package copies conpty.dll and NOTHING ELSE, and conpty.dll with no host to
-         launch falls back to conhost silently. The package derives ConptyNativePlatform from
-         PlatformTarget, which for a managed library is AnyCPU and matches none of its branches;
-         setting the two flags directly works because they are read by its .targets, which imports
-         after this file, whereas its .props has already run.
-
-         Both x64 and ARM64, because an x64 process runs on ARM64 Windows under emulation. -->
     <ConptyRequiresx64Host>true</ConptyRequiresx64Host>
     <ConptyRequiresARM64Host>true</ConptyRequiresARM64Host>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- conpty.dll + OpenConsole.exe, the implementation Windows Terminal ships. Back in the library
-         because the default path uses it; PseudoConsole falls back to in-box when it is absent, so a
-         consumer that somehow does not get the natives degrades rather than breaks. -->
+    <InternalsVisibleTo Include="Porta.Pty.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.24.260710001" />
   </ItemGroup>
 
   <ItemGroup>
-    <!-- buildTransitive: ConPTY ships its host-staging logic under build/, which imports for a DIRECT
-         reference only — so a CONSUMER of this package must be given it. See the file.
-
-         The packaged NAME has to be $(PackageId): NuGet auto-imports
-         buildTransitive/{PackageId}.targets and ignores every other name. That is the same string
-         as this file's own name here, so the package is unchanged — but only as long as the two
-         agree. Pack under any other id (-p:PackageId, as a repackaging fork does) and the file
-         ships inert: it restores, it builds, and ConPTY is simply never staged, leaving a silent
-         fall back to conhost. NU5131 warns about exactly this. -->
     <None Include="build/Porta.Pty.targets" Pack="true" PackagePath="buildTransitive/$(PackageId).targets" />
   </ItemGroup>
 
@@ -88,28 +53,6 @@
     <None Include="../../icon.png" Pack="true" PackagePath="" />
   </ItemGroup>
 
-  <!-- Native runtime libraries for each platform -->
-  <!-- These are built from src/Porta.Pty.Native and placed in the runtimes folder -->
-  <!--
-    The POSIX shim, in its two roles.
-
-    Each RID appears EXACTLY ONCE, which is the whole point of the shape below. The host's shim needs
-    a second role beyond packing — it must also be copied to the output of PROJECT-reference consumers
-    (the test project, samples/Porta.Pty.Demo), which get no .nupkg and so resolve nothing from
-    runtimes/. That used to be done by hand in the CI workflows, with a literal path that silently
-    pointed at a directory that no longer existed once the test output went RID-specific; the run then
-    failed as DllNotFoundException naming nothing.
-
-    The obvious fix — a second Content item pointing at the same file with Pack="false" — is a trap,
-    and it packs cleanly while being badly wrong: two items with the same Identity are reconciled by
-    NuGet, Pack="false" wins, and the package loses that RID. Because the RID chosen is the BUILD
-    HOST'S, the package is then always missing exactly the platform it was built on, and every other
-    platform's shim is present, so the listing looks plausible. Measured: packing on osx-arm64 produced
-    a package containing osx-x64 alone.
-
-    Hence one item per RID, and the host's is Content rather than None. Content is what flows down a
-    ProjectReference into the consumer's output; None does not.
-  -->
   <PropertyGroup>
     <_PortaPtyNativeRoot>$(MSBuildThisFileDirectory)../Porta.Pty.Native/output/runtimes/</_PortaPtyNativeRoot>
     <_PortaPtyShimRid Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</_PortaPtyShimRid>
@@ -120,10 +63,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Every RID except the build host's. Exists() throughout, so a clone that has not run
-         src/Porta.Pty.Native/build.sh still builds — the consequence being that a package can be
-         produced with no shim at all and no warning, which is why scripts/verify-consumer.sh asserts
-         on the packed contents rather than trusting the pack to have said something. -->
     <None Include="$(_PortaPtyNativeRoot)linux-x64/native/libporta_pty.so"
           Pack="true"
           PackagePath="runtimes/linux-x64/native/"
@@ -143,7 +82,6 @@
   </ItemGroup>
 
   <ItemGroup Condition="'$(_PortaPtyShimName)' != '' And Exists('$(_PortaPtyShimPath)')">
-    <!-- The host's shim, carrying BOTH roles in one item so the file is declared exactly once. -->
     <Content Include="$(_PortaPtyShimPath)"
              Pack="true"
              PackagePath="runtimes/$(_PortaPtyShimRid)/native/"
@@ -152,15 +90,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- <PackageReference Include="Mono.Posix.NETStandard" Version="1.0.0" /> -->
-
-    <!-- CsWin32 source-generates the Win32 P/Invokes from NativeMethods.txt, replacing
-         Vanara.PInvoke.Kernel32. The point is the RUNTIME dependency: Vanara ships an assembly that
-         every consumer of this package then carries, for perhaps twenty entry points. CsWin32 is a
-         build-time analyzer with PrivateAssets=all, so it contributes nothing at runtime and nothing
-         to a consumer's graph. The generated interop is also trimming and AOT friendly, which the
-         reflection-free Vanara wrappers mostly are but not uniformly.
-         Idea taken from Sylinko's fork of Porta.Pty, which did the same port. -->
     <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.183">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>

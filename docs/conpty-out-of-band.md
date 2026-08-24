@@ -41,12 +41,38 @@ The fix is to answer. Immediately after spawning, write a well-formed DA1 respon
 \x1b[?1;2c        DA1 — VT100 with Advanced Video Option
 ```
 
-Answering *reactively*, on observing `ESC[c` in the output, was measured and does **not** work — it
-races the handshake and usually arrives after `WaitUntilDA1` has already given up. Send it up front,
-unconditionally, before reading anything.
+Answering *reactively* was measured here and did **not** work for a read-only consumer, so the answer
+goes out up front, unconditionally, before anything is read.
 
 This is also why VS Code's terminal shows no such stall on OpenConsole: xterm.js answers DA1 in
 milliseconds. Nothing about the implementation is slow.
+
+### The query still goes downstream, and a terminal will answer it too
+
+ConPTY forwards its own `ESC[c` to the consumer as well. A consumer that is a real terminal emulator
+answers it, because answering DA1 is what terminals do — and by then the handshake has already been
+satisfied by our reply, so ConPTY does not consume the second answer. It reaches the child as keyboard
+input, and an interactive shell echoes it: `^[[?1;2c` beside the first prompt.
+
+Measured over `cmd.exe`, time from spawn to the child's first output:
+
+| who answers DA1                    | first client output | what the user sees |
+|------------------------------------|---------------------|--------------------|
+| nobody (read-only consumer)        | 3088 ms, 3097 ms    | clean              |
+| `PtyProvider` only                 | 109 ms              | clean              |
+| a terminal emulator only           | 92 ms               | clean              |
+| **both** — the default, before the fix | 109 ms          | **`^[[?1;2c`**     |
+
+Two things worth keeping straight, because the third row corrects something this document used to say.
+A reactive answer from a real emulator *is* timely — 92 ms, no stall — so "reacting does not work" holds
+for a consumer that has to be taught to answer, not for one that already does. And the stall in row one
+is real, which is why the up-front answer stays.
+
+So `PseudoConsoleConnection` **removes that query from the output** (`StartupDa1FilterStream`), on the
+same condition the answer is sent. The invariant is one sentence: *we* answered this question, so the
+consumer is never asked it. Only the first `ESC[c`, and only near the start of the stream — a DA1 query
+from the **child** is forwarded the same way, nobody has answered that one, and the consumer is the only
+one who can.
 
 ## Adopted, and what a consumer has to know
 
@@ -58,9 +84,11 @@ Three things about the answer, each learned by getting it wrong first:
 
 * It is sent **unconditionally and immediately**, not on observing `ESC[c`. Reacting to the query races
   the handshake and usually arrives after `WaitUntilDA1` has given up. Measured: reactive still cost
-  ~3.01 s.
+  ~3.01 s. (An emulator consumer that answers DA1 natively is the exception — see above.)
 * It is sent **only on the out-of-band path.** In-box emits no query, so the same bytes would not be
   consumed by a handshake and would reach the child as keyboard input.
+* The query is **removed from the output**, so a consumer that would answer it does not answer it
+  twice. Same condition as the answer; whoever stops answering must stop hiding the query too.
 * It is **never fatal.** If the write fails the terminal still works; it just pays the timeout it would
   have paid anyway.
 

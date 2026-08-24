@@ -332,6 +332,24 @@ namespace Porta.Pty.Windows
         /// <summary>Gets a value indicating whether this pseudoconsole came from conpty.dll.</summary>
         public bool IsOutOfBand => this.outOfBand;
 
+        /// <summary>
+        /// Gets a value indicating whether this pseudoconsole will open by asking the terminal what it
+        /// is — the Primary Device Attributes query, <c>ESC[c</c>.
+        /// </summary>
+        /// <remarks>
+        /// <para>Not the same question as <see cref="IsOutOfBand"/>, and the difference is the whole
+        /// reason this exists. conpty.dll with no <c>OpenConsole.exe</c> beside it falls back to conhost
+        /// internally and asks nothing, so a pseudoconsole can be out-of-band by selection and in-box in
+        /// behaviour. <see cref="ResolvePreference"/> refuses that combination by default; forcing
+        /// <c>PORTAPTY_CONPTY=oob</c> produces it deliberately.</para>
+        ///
+        /// <para>Answering a question that was never asked leaves the answer to be delivered to the
+        /// child as keyboard input, and hiding a query that ConPTY never sent would swallow the CHILD's
+        /// first <c>ESC[c</c> instead — a program asking what terminal it is under, never answered. So
+        /// both halves are gated on this rather than on selection.</para>
+        /// </remarks>
+        public bool AsksStartupDeviceAttributes => this.outOfBand && OutOfBandHostPresent;
+
         /// <summary>Gets the raw HPCON, for the process-thread attribute list.</summary>
         public IntPtr Handle => this.handle;
 

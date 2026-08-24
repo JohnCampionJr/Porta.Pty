@@ -434,7 +434,11 @@ namespace Porta.Pty.Windows
         /// </summary>
         private static void AnswerDeviceAttributes(IPtyConnection connection, PseudoConsole pseudoConsole)
         {
-            if (!pseudoConsole.IsOutOfBand)
+            // Whether it ASKS, not whether it was selected: conpty.dll with no OpenConsole.exe beside
+            // it falls back to conhost and asks nothing, and an answer to a question nobody asked is
+            // just bytes on the child's stdin. PseudoConsoleConnection hides the query on the same
+            // condition -- see AsksStartupDeviceAttributes.
+            if (!pseudoConsole.AsksStartupDeviceAttributes)
             {
                 return;
             }
