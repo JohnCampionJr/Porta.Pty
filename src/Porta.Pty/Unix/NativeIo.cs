@@ -87,5 +87,27 @@ namespace Porta.Pty.Unix
 
         [DllImport("libporta_pty", SetLastError = true)]
         private static extern int pty_set_nonblocking(int fd);
+
+        /// <summary>
+        /// Creates a pollable descriptor that reports child exits, or -1 when the kernel cannot.
+        /// </summary>
+        /// <remarks>
+        /// -1 is not a failure to handle as one: it means this kernel has no such mechanism --
+        /// Linux below 5.3 has no pidfd_open -- and the caller should keep polling waitpid instead.
+        /// </remarks>
+        [DllImport("libporta_pty", SetLastError = true)]
+        internal static extern int pty_exit_queue();
+
+        /// <summary>
+        /// Starts watching one pid. Returns 0, or -1 including when the child has already exited.
+        /// </summary>
+        [DllImport("libporta_pty", SetLastError = true)]
+        internal static extern int pty_exit_watch(int queue, int pid);
+
+        /// <summary>
+        /// Collects the pids that have exited, without blocking. Returns how many were written.
+        /// </summary>
+        [DllImport("libporta_pty", SetLastError = true)]
+        internal static extern int pty_exit_drain(int queue, [Out] int[] pids, int max);
     }
 }

@@ -7,6 +7,8 @@ namespace Porta.Pty.Unix
     using System.Collections.Generic;
     using System.Runtime.InteropServices;
     using System.Threading;
+    using System.Threading.Tasks;
+    using static Porta.Pty.Unix.NativeIo;
 
     /// <summary>
     /// Collects exit statuses for every pty child in the process from one thread.
@@ -50,9 +52,23 @@ namespace Porta.Pty.Unix
         private readonly object gate = new();
         private readonly Dictionary<int, Entry> children = new();
         private readonly AutoResetEvent registered = new(false);
+        private readonly int queue;
 
         private PtyReaper()
         {
+            this.queue = pty_exit_queue();
+
+            if (this.queue >= 0)
+            {
+                // No thread. The queue is a pollable descriptor, so waiting on it is one more
+                // registration in the poll loop that already exists -- which is the point of this:
+                // it removes the reaper thread rather than making it cleverer.
+                _ = Task.Run(this.WatchAsync);
+                return;
+            }
+
+            // The kernel cannot tell us, so we go back to asking. Linux below 5.3 has no
+            // pidfd_open, and this is the path that serves it.
             var thread = new Thread(this.Loop)
             {
                 IsBackground = true,
@@ -80,7 +96,19 @@ namespace Porta.Pty.Unix
                 this.children[pid] = new Entry(attempt, onExited);
             }
 
-            // Wake the loop so a child that exits immediately is not held for a full interval.
+            if (this.queue >= 0 && pty_exit_watch(this.queue, pid) == 0)
+            {
+                return;
+            }
+
+            // Watching failed, and the likeliest reason is that the child has ALREADY exited --
+            // both kernels report that as ESRCH, which is indistinguishable here from a real
+            // failure. Collect it directly: an exit that happens between spawning and watching is
+            // otherwise never reported, and WaitForExit would wait on a process already gone.
+            this.CollectIfExited(pid);
+
+            // Wake the fallback loop so a child that exits immediately is not held for a full
+            // interval. Harmless when the kernel path is in use and nothing is waiting on it.
             this.registered.Set();
         }
 
@@ -97,6 +125,90 @@ namespace Porta.Pty.Unix
             lock (this.gate)
             {
                 this.children.Remove(pid);
+            }
+        }
+
+        /// <summary>
+        /// Parks on the exit queue and collects whatever it reports. Holds no thread while waiting.
+        /// </summary>
+        private async Task WatchAsync()
+        {
+            var pids = new int[64];
+
+            while (true)
+            {
+                try
+                {
+                    await PtyPoller.Instance.WaitReadableAsync(this.queue, CancellationToken.None).ConfigureAwait(false);
+
+                    int count = pty_exit_drain(this.queue, pids, pids.Length);
+                    for (var i = 0; i < count; i++)
+                    {
+                        this.CollectIfExited(pids[i]);
+                    }
+                }
+                catch
+                {
+                    // Nothing useful to do with a failure here, and letting it escape would end the
+                    // watch for every session in the process. Pause rather than spin.
+                    await Task.Delay(Interval).ConfigureAwait(false);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Reaps one pid if it has exited, and reports it.
+        /// </summary>
+        private void CollectIfExited(int pid)
+        {
+            Entry? entry;
+            lock (this.gate)
+            {
+                if (!this.children.TryGetValue(pid, out entry))
+                {
+                    return;
+                }
+            }
+
+            int status = 0;
+            int result;
+            int error = 0;
+            try
+            {
+                result = entry!.Attempt(pid, ref status);
+                error = result < 0 ? Marshal.GetLastPInvokeError() : 0;
+            }
+            catch
+            {
+                result = -1;
+                error = 0;
+            }
+
+            if (result == 0 || (result < 0 && error == EINTR))
+            {
+                // Not collectable yet, or interrupted. Either way it stays registered.
+                return;
+            }
+
+            lock (this.gate)
+            {
+                this.children.Remove(pid);
+            }
+
+            if (result < 0)
+            {
+                // ECHILD: something else collected it and there is no status to be had. Reporting
+                // the zero would claim the child succeeded.
+                return;
+            }
+
+            try
+            {
+                entry.OnExited(status);
+            }
+            catch
+            {
+                // A consumer's exit handler throwing is not ours to propagate.
             }
         }
 
