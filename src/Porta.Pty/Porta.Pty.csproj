@@ -29,11 +29,6 @@
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <RepositoryUrl>https://github.com/tomlm/Porta.Pty</RepositoryUrl>
     <Copyright>Tom Laird-McConnell All Rights Reserved</Copyright>
-    <!-- 2.0.0: the target framework moves netstandard2.0 -> net10.0, which is a breaking change for any
-         .NET Framework or netstandard consumer, and Vanara leaves the dependency graph.
-         2.0.1: ConPTY's startup Primary Device Attributes query no longer reaches the consumer, since
-         we answer it ourselves. A consumer that is a terminal was answering it a second time, and the
-         surplus answer arrived at the child as keyboard input. -->
     <Version>2.0.1</Version>
     <AssemblyVersion>2.0.1.0</AssemblyVersion>
     <RootNamespace>Porta.Pty</RootNamespace>
@@ -62,9 +57,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- StartupDa1FilterStream removes a byte sequence that can arrive split across two reads, and a
-         real pseudoconsole cannot be made to split it on demand. The tests that pin that behaviour
-         drive the stream over a scripted inner stream instead, which needs to see the type. -->
     <InternalsVisibleTo Include="Porta.Pty.Tests" />
   </ItemGroup>
 
