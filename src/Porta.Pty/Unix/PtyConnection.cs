@@ -31,9 +31,32 @@ namespace Porta.Pty.Unix
         /// <param name="controller">The fd of the pty controller.</param>
         /// <param name="pid">The id of the spawned process.</param>
         public PtyConnection(int controller, int pid)
+            : this(controller, pid, useAsyncIo: false)
         {
-            this.ReaderStream = new PtyStream(controller, FileAccess.Read);
-            this.WriterStream = new PtyStream(controller, FileAccess.Write);
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="PtyConnection"/> class.
+        /// </summary>
+        /// <param name="controller">The fd of the pty controller.</param>
+        /// <param name="pid">The id of the spawned process.</param>
+        /// <param name="useAsyncIo">Whether async reads and writes should avoid holding a thread.</param>
+        public PtyConnection(int controller, int pid, bool useAsyncIo)
+        {
+            if (useAsyncIo && NativeIo.SetNonBlocking(controller))
+            {
+                // Both streams share the one descriptor, so the mode is a property of the
+                // connection rather than of either stream. If the fcntl fails there is nothing to
+                // recover -- fall back to the blocking pair rather than run non-blocking code over a
+                // blocking descriptor, which would block inside the poller's own read.
+                this.ReaderStream = new NonBlockingPtyStream(controller, FileAccess.Read);
+                this.WriterStream = new NonBlockingPtyStream(controller, FileAccess.Write);
+            }
+            else
+            {
+                this.ReaderStream = new PtyStream(controller, FileAccess.Read);
+                this.WriterStream = new PtyStream(controller, FileAccess.Write);
+            }
 
             this.controller = controller;
             this.pid = pid;

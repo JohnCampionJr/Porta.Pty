@@ -52,5 +52,25 @@ namespace Porta.Pty
         /// Gets or sets the process' environment variables.
         /// </summary>
         public IDictionary<string, string> Environment { get; set; } = new Dictionary<string, string>();
+
+        /// <summary>
+        /// Gets or sets a value indicating whether reads and writes should complete without holding
+        /// a thread. Off by default.
+        /// </summary>
+        /// <remarks>
+        /// The same guarantee on every platform, which is the only thing that makes it worth being
+        /// one option rather than two: with this set, awaiting ReadAsync on an idle session occupies
+        /// no thread, so a process can hold many sessions open at a cost that does not scale with
+        /// how many of them are quiet. How that is achieved differs -- one shared poll(2) loop on
+        /// Unix, overlapped pipes and the I/O completion port on Windows -- but what a caller can
+        /// rely on does not.
+        ///
+        /// Opt-in because it changes the I/O path underneath every existing consumer. The default
+        /// path is unchanged: a blocking descriptor, and ReadAsync serviced by the thread pool.
+        ///
+        /// Synchronous Read and Write keep working either way, and still block the calling thread.
+        /// This is about what ASYNC costs, not about removing the sync API.
+        /// </remarks>
+        public bool UseAsyncIo { get; set; }
     }
 }

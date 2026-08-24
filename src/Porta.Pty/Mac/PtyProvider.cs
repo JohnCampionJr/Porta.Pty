@@ -81,7 +81,7 @@ namespace Porta.Pty.Mac
                     + $"({GetErrorMessage(result.Error)}), masterFd={result.MasterFd}, pid={result.Pid}");
             }
 
-            return Task.FromResult<IPtyConnection>(new PtyConnection(result.MasterFd, result.Pid));
+            return Task.FromResult<IPtyConnection>(new PtyConnection(result.MasterFd, result.Pid, options.UseAsyncIo));
         }
 
         /// <remarks>
