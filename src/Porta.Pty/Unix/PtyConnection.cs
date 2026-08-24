@@ -130,12 +130,18 @@ namespace Porta.Pty.Unix
             // back to back and the third started failing; each test alone had always been fine.
             this.TryClose();
 
-            if (this.usesSharedReaper)
-            {
-                // The pid may already be gone, in which case this is a no-op. Leaving it registered
-                // would keep the reaper waiting on a child nobody is listening for.
-                PtyReaper.Instance.Unregister(this.pid);
-            }
+            // Deliberately NOT unregistering from the reaper. TryKill above sends SIGHUP and then
+            // SIGKILL, but a signalled child is not a collected one -- it stays a zombie until
+            // somebody waits on it. Dropping the registration here meant nothing ever did, so a
+            // disposed connection leaked a process table entry for the life of the host.
+            //
+            // The blocking path does not have that problem because its watcher thread stays in
+            // waitpid until the child is collected, and keeps doing so after Dispose. Leaving the
+            // registration in place is what matches it: the reaper collects the status on its next
+            // pass and drops the entry itself.
+            //
+            // The churn test hid this, because it calls Kill and WaitForExit before Dispose, which
+            // gives the reaper time to collect first.
         }
 
         /// <inheritdoc/>
@@ -237,8 +243,6 @@ namespace Porta.Pty.Unix
         private void ChildWatcherThreadProc()
         {
             Debug.WriteLine($"Waiting on {this.pid}");
-            const int SignalMask = 127;
-            const int ExitCodeMask = 255;
 
             int status = 0;
             if (!this.WaitPid(this.pid, ref status))

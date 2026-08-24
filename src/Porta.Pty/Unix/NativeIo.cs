@@ -17,6 +17,15 @@ namespace Porta.Pty.Unix
     /// </remarks>
     internal static class NativeIo
     {
+        // On the library name: "libc" is deliberate. The runtime probes libc.so and hands it to
+        // dlopen, which resolves it through ld.so.cache to the real libc.so.6 -- it never tries to
+        // load the linker script at /usr/lib/libc.so, because it does not open a path. Verified
+        // rather than assumed: the Linux CI leg exercises every one of these calls and passes.
+        //
+        // musl is the open question. Alpine has no libc.so under that name, and this has never been
+        // run there. If musl is ever a target, the fix is NativeLibrary.SetDllImportResolver rather
+        // than a different literal, since no single name covers both.
+
         internal const short POLLIN = 0x001;
         internal const short POLLOUT = 0x004;
         internal const short POLLERR = 0x008;

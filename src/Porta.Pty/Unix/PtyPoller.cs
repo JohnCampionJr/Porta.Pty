@@ -110,28 +110,65 @@ namespace Porta.Pty.Unix
             }
 
             var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Waiter waiter;
 
             lock (this.gate)
             {
                 if (!this.registrations.TryGetValue(fd, out var registration))
                 {
-                    registration = new Registration(fd);
+                    registration = new Registration();
                     this.registrations[fd] = registration;
                 }
 
-                registration.Add(events, completion);
+                waiter = registration.Add(events, completion);
             }
 
             if (cancellationToken.CanBeCanceled)
             {
-                // The wait itself is not cancellable -- poll() has no notion of one waiter going
-                // away -- so the TASK is completed and the registration is left to be cleaned up by
-                // the next loop pass. A stale entry costs one wakeup, not correctness.
-                cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
+                // Cancelling has to REMOVE the waiter, not just complete its task. A cancelled waiter
+                // left in place keeps the registration's interest non-zero, so the stale-pruning pass
+                // never drops the descriptor and the poller watches an fd nobody is waiting on.
+                //
+                // And the registration is disposed once the task settles, however it settles. Reads
+                // retry in a loop against one long-lived token, so a callback left attached per
+                // iteration -- each holding its TaskCompletionSource -- grows without bound on the
+                // hot path for as long as the caller's token lives.
+                var subscription = cancellationToken.Register(() =>
+                {
+                    if (completion.TrySetCanceled(cancellationToken))
+                    {
+                        this.RemoveWaiter(fd, waiter);
+                    }
+                });
+
+                completion.Task.ContinueWith(
+                    static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+                    subscription,
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
             }
 
             this.Wake();
             return completion.Task;
+        }
+
+        /// <summary>
+        /// Drops one waiter, and the registration with it if that was the last one.
+        /// </summary>
+        private void RemoveWaiter(int fd, Waiter waiter)
+        {
+            lock (this.gate)
+            {
+                if (this.registrations.TryGetValue(fd, out var registration) && registration.Remove(waiter) == 0)
+                {
+                    this.registrations.Remove(fd);
+                }
+            }
+
+            // Rebuild the poll set without it, rather than leaving the descriptor in until something
+            // else happens to wake the loop.
+            this.Wake();
         }
 
         private void Wake()
@@ -246,13 +283,22 @@ namespace Porta.Pty.Unix
             }
         }
 
+        private sealed class Waiter
+        {
+            internal Waiter(short events, TaskCompletionSource completion)
+            {
+                this.Events = events;
+                this.Completion = completion;
+            }
+
+            internal short Events { get; }
+
+            internal TaskCompletionSource Completion { get; }
+        }
+
         private sealed class Registration
         {
-            private readonly List<(short Events, TaskCompletionSource Completion)> waiters = new();
-
-            internal Registration(int fd) => this.Fd = fd;
-
-            internal int Fd { get; }
+            private readonly List<Waiter> waiters = new();
 
             internal short InterestedEvents
             {
@@ -271,11 +317,26 @@ namespace Porta.Pty.Unix
                 }
             }
 
-            internal void Add(short events, TaskCompletionSource completion)
+            internal Waiter Add(short events, TaskCompletionSource completion)
+            {
+                var waiter = new Waiter(events, completion);
+                lock (this.waiters)
+                {
+                    this.waiters.Add(waiter);
+                }
+
+                return waiter;
+            }
+
+            /// <summary>
+            /// Removes one waiter and reports how many are left.
+            /// </summary>
+            internal int Remove(Waiter waiter)
             {
                 lock (this.waiters)
                 {
-                    this.waiters.Add((events, completion));
+                    this.waiters.Remove(waiter);
+                    return this.waiters.Count;
                 }
             }
 

@@ -53,7 +53,7 @@ namespace Porta.Pty.Unix
 
         public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
         {
-            ValidateArguments(buffer, offset, count);
+            ValidateBufferArguments(buffer, offset, count);
 
             while (true)
             {
@@ -93,7 +93,7 @@ namespace Porta.Pty.Unix
 
         public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
         {
-            ValidateArguments(buffer, offset, count);
+            ValidateBufferArguments(buffer, offset, count);
 
             // A pty accepts writes up to the line discipline's buffer and no further, so a large
             // write is normally a partial one. Looping is not an edge case here.
@@ -151,15 +151,6 @@ namespace Porta.Pty.Unix
         }
 
         private const int EIoError = 5;
-
-        private static void ValidateArguments(byte[] buffer, int offset, int count)
-        {
-            ArgumentNullException.ThrowIfNull(buffer);
-            if (offset < 0 || count < 0 || offset + count > buffer.Length)
-            {
-                throw new ArgumentOutOfRangeException(nameof(count));
-            }
-        }
 
         private unsafe int TryTransfer(byte[] buffer, int offset, int count, bool reading, out int error)
         {

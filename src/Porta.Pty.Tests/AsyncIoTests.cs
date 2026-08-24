@@ -25,6 +25,9 @@ namespace Porta.Pty.Tests
     [TestClass]
     public class AsyncIoTests
     {
+        /// <summary>EIO, which is how Linux ends a read on a pty whose child has exited.</summary>
+        private const int Eio = 5;
+
         private static readonly int TestTimeoutMs = Debugger.IsAttached ? 300_000 : 60_000;
 
         private static bool IsWindows => RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
@@ -186,6 +189,85 @@ namespace Porta.Pty.Tests
         }
 
         [TestMethod]
+        public async Task AsyncIo_ReapsTheChild_WhenDisposedWithoutWaiting()
+        {
+            // Dispose signals the child but does not collect it, and a signalled child is not a
+            // reaped one -- it stays a zombie until somebody waits on it. Dropping the reaper
+            // registration here meant nothing ever did.
+            //
+            // Deliberately no Kill/WaitForExit before Dispose. That pair is what the churn test does,
+            // and it hides this: it gives the reaper time to collect the status first.
+            using var cts = new CancellationTokenSource(TestTimeoutMs);
+
+            // A child that IGNORES SIGHUP. Kill sends SIGHUP, sleeps 100ms, then SIGKILL -- and with
+            // an ordinary shell that first signal ends it, so the reaper collects the status during
+            // the sleep and the bug cannot show. Ignoring SIGHUP moves the death to the SIGKILL at
+            // the very end of Dispose, microseconds before the registration would be dropped.
+            var options = new PtyOptions
+            {
+                Name = "DisposeReap",
+                Cols = 120,
+                Rows = 25,
+                Cwd = Environment.CurrentDirectory,
+                App = "/bin/sh",
+                CommandLine = new[] { "-c", "trap '' HUP; while :; do sleep 1; done" },
+                VerbatimCommandLine = true,
+                Environment = new Dictionary<string, string>(),
+                UseAsyncIo = true,
+            };
+
+            IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
+            int pid = terminal.Pid;
+            await Task.Delay(500, cts.Token);
+            ProcessState(pid).Should().NotBeEmpty("precondition: the child is running before dispose");
+            terminal.Dispose();
+
+            var stopwatch = Stopwatch.StartNew();
+            string state = "?";
+            while (stopwatch.Elapsed < TimeSpan.FromSeconds(10))
+            {
+                state = ProcessState(pid);
+                if (state.Length == 0)
+                {
+                    break;
+                }
+
+                await Task.Delay(100, cts.Token);
+            }
+
+            state.Should().BeEmpty(
+                "the child should have been collected, but ps still reports it in state '{0}' -- 'Z' is a zombie", state);
+        }
+
+        /// <summary>
+        /// The process state ps reports for a pid, or empty when the pid is gone.
+        /// </summary>
+        private static string ProcessState(int pid)
+        {
+            try
+            {
+                using var ps = Process.Start(new ProcessStartInfo("ps", $"-o stat= -p {pid}")
+                {
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                });
+
+                if (ps is null)
+                {
+                    return string.Empty;
+                }
+
+                string output = ps.StandardOutput.ReadToEnd().Trim();
+                ps.WaitForExit(5000);
+                return output;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        [TestMethod]
         public async Task AsyncIo_SurvivesChurn_WithoutLeakingDescriptorsThreadsOrCpu()
         {
             // Three leaks are possible here and none of them announces itself. Descriptors: this
@@ -200,8 +282,6 @@ namespace Porta.Pty.Tests
             using var cts = new CancellationTokenSource(TestTimeoutMs);
 
             int threadsBefore = Process.GetCurrentProcess().Threads.Count;
-            TimeSpan cpuBefore = Process.GetCurrentProcess().TotalProcessorTime;
-            var wall = Stopwatch.StartNew();
 
             for (var i = 0; i < Rounds; i++)
             {
@@ -211,7 +291,11 @@ namespace Porta.Pty.Tests
                 terminal.WaitForExit(2000);
             }
 
-            // Idle afterwards, so what is measured below is the loop at rest rather than the work.
+            // Idle window only. Starting the clock before the churn measured the spawn work as well,
+            // which on a multi-core agent can put processor time above wall time all by itself -- so
+            // the bound could fail with no spin at all, and pass while hiding one.
+            TimeSpan cpuBefore = Process.GetCurrentProcess().TotalProcessorTime;
+            var wall = Stopwatch.StartNew();
             await Task.Delay(2000, cts.Token);
 
             wall.Stop();
@@ -349,13 +433,16 @@ namespace Porta.Pty.Tests
                 {
                     continue;
                 }
-                catch (IOException)
+                catch (IOException ex) when (ex.HResult == Eio)
                 {
-                    // End of stream, on Linux. Reading a pty controller after the child exits gives
-                    // EIO there and 0 on macOS, so the default blocking stream THROWS on one platform
-                    // and returns cleanly on the other for the same event. NonBlockingPtyStream
-                    // normalises EIO to 0; the default path does not, and this is the difference
-                    // showing through. Not this branch's to fix, but worth knowing it exists.
+                    // EIO only. Reading a pty controller after the child exits gives EIO on Linux and
+                    // 0 on macOS, so the default blocking stream THROWS on one platform and returns
+                    // cleanly on the other for the same event. NonBlockingPtyStream normalises EIO to
+                    // 0; the default path does not, and this is that difference showing through. Not
+                    // this branch's to fix.
+                    //
+                    // Narrowed to EIO on purpose: catching every IOException would let a test pass
+                    // after a genuine read failure by calling it end of stream.
                     break;
                 }
 

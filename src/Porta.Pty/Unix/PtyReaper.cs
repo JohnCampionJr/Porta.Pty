@@ -77,9 +77,13 @@ namespace Porta.Pty.Unix
         }
 
         /// <summary>
-        /// Stops watching a pid whose status will never be collected, typically because the
-        /// connection was disposed.
+        /// Stops watching a pid.
         /// </summary>
+        /// <remarks>
+        /// Deliberately NOT called from PtyConnection.Dispose. A disposed connection has signalled
+        /// its child but not collected it, and dropping the watch there left a zombie for the life
+        /// of the host process. Kept for a caller that genuinely knows a pid is already reaped.
+        /// </remarks>
         internal void Unregister(int pid)
         {
             lock (this.gate)
@@ -123,12 +127,20 @@ namespace Porta.Pty.Unix
                         continue;
                     }
 
-                    // Anything other than "still running" ends the watch. A failure is almost always
-                    // ECHILD, meaning something else already collected it, and there is no status to
-                    // be had -- reporting the zero is better than watching a pid forever.
+                    // Anything other than "still running" ends the watch.
                     lock (this.gate)
                     {
                         this.children.Remove(pair.Key);
+                    }
+
+                    if (result < 0)
+                    {
+                        // Almost always ECHILD: something else collected the status and there is
+                        // none to be had. Reporting the zero sitting in `status` would claim the
+                        // child succeeded, which is a specific and wrong answer rather than an
+                        // absent one -- so the watch just ends, and WaitForExit and ExitCode keep
+                        // whatever they already had.
+                        continue;
                     }
 
                     finished.Add((pair.Value, status));
@@ -148,7 +160,17 @@ namespace Porta.Pty.Unix
                     }
                 }
 
-                this.registered.WaitOne(Interval);
+                // Wait without a deadline when there is nothing to watch. Register signals the
+                // event, so a new child still wakes the loop immediately -- and an application that
+                // opened one session and closed it does not keep a 10Hz wakeup for the life of the
+                // process, which would work against the very thing this class is for.
+                bool idle;
+                lock (this.gate)
+                {
+                    idle = this.children.Count == 0;
+                }
+
+                this.registered.WaitOne(idle ? Timeout.InfiniteTimeSpan : Interval);
             }
         }
 
