@@ -41,12 +41,22 @@ namespace Porta.Pty.Windows
         {
             // Use FileStream with the pipe handles for direct access
             // This avoids the buffering issues that can occur with AnonymousPipeClientStream
-            this.ReaderStream = new FileStream(
+            Stream reader = new FileStream(
                 new SafeFileHandle(handles.OutPipeOurSide.DangerousGetHandle(), ownsHandle: false),
                 System.IO.FileAccess.Read,
                 bufferSize: 0,  // No buffering
                 isAsync: false);
-            
+
+            // Paired with PtyProvider.AnswerDeviceAttributes, and gated on the same condition it is:
+            // out-of-band ConPTY is the only one that asks, we answer for the consumer, and so the
+            // consumer must not see the question. A consumer that is a terminal emulator would
+            // otherwise answer it too, and the second answer reaches the child as keyboard input.
+            // Keep the two in step: whoever stops answering must stop hiding the query as well.
+            this.ReaderStream = handles.PseudoConsoleHandle.IsOutOfBand
+                ? new StartupDa1FilterStream(reader)
+                : reader;
+
+
             this.WriterStream = new FileStream(
                 new SafeFileHandle(handles.InPipeOurSide.DangerousGetHandle(), ownsHandle: false),
                 System.IO.FileAccess.Write,

@@ -59,6 +59,13 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- StartupDa1FilterStream removes a byte sequence that can arrive split across two reads, and a
+         real pseudoconsole cannot be made to split it on demand. The tests that pin that behaviour
+         drive the stream over a scripted inner stream instead, which needs to see the type. -->
+    <InternalsVisibleTo Include="Porta.Pty.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- conpty.dll + OpenConsole.exe, the implementation Windows Terminal ships. Back in the library
          because the default path uses it; PseudoConsole falls back to in-box when it is absent, so a
          consumer that somehow does not get the natives degrades rather than breaks. -->
