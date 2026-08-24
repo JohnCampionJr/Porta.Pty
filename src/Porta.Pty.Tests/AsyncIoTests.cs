@@ -210,33 +210,35 @@ namespace Porta.Pty.Tests
 
             IPtyConnection terminal = await PtyProvider.SpawnAsync(options, cts.Token);
             int pid = terminal.Pid;
-            await Task.Delay(500, cts.Token);
-            ProcessState(pid).Should().NotBeEmpty("precondition: the child is running before dispose");
-            terminal.Dispose();
-
-            var stopwatch = Stopwatch.StartNew();
             string state = "?";
-            while (stopwatch.Elapsed < TimeSpan.FromSeconds(10))
-            {
-                state = ProcessState(pid);
-                if (state.Length == 0)
-                {
-                    break;
-                }
-
-                await Task.Delay(100, cts.Token);
-            }
 
             try
             {
+                await Task.Delay(500, cts.Token);
+                ProcessState(pid).Should().NotBeEmpty("precondition: the child is running before dispose");
+                terminal.Dispose();
+
+                // Linux Dispose sends only SIGHUP, which this child ignores. Force its death after
+                // disposal so this test exercises whether the retained reaper registration collects
+                // a child that exits after the connection is already gone.
+                if (ProcessState(pid).Length > 0)
+                {
+                    ForceKill(pid);
+                }
+
+                var stopwatch = Stopwatch.StartNew();
+                while (stopwatch.Elapsed < TimeSpan.FromSeconds(10))
+                {
+                    state = ProcessState(pid);
+                    if (state.Length == 0)
+                    {
+                        break;
+                    }
+
+                    await Task.Delay(100, cts.Token);
+                }
+
                 // Asserts NOT-A-ZOMBIE rather than gone, because those are two different properties
-                // and only one of them is this branch's. On macOS the child is dead and collected,
-                // so ps reports nothing. On Linux it is still RUNNING -- Kill there sends SIGHUP and
-                // stops, where the macOS implementation escalates to SIGKILL, so a child ignoring
-                // SIGHUP survives Dispose entirely. That is a real inconsistency between the two
-                // platforms, but it is a pre-existing one about Kill, not about reaping, and
-                // asserting "gone" here would fail Linux for the wrong reason.
-                //
                 // A zombie is what the reaper bug produced, and 'Z' is what this catches. Verified
                 // by reintroducing the bug on macOS: state came back "Z".
                 state.Should().NotStartWith(
@@ -245,19 +247,27 @@ namespace Porta.Pty.Tests
             }
             finally
             {
-                // The Linux case leaves a live process behind, so it does not outlive the test run.
+                terminal.Dispose();
                 if (ProcessState(pid).Length > 0)
                 {
-                    try
-                    {
-                        using var kill = Process.Start(new ProcessStartInfo("kill", $"-9 {pid}"));
-                        kill?.WaitForExit(5000);
-                    }
-                    catch
-                    {
-                        // Best effort.
-                    }
+                    ForceKill(pid);
                 }
+            }
+        }
+
+        private static void ForceKill(int pid)
+        {
+            try
+            {
+                var startInfo = new ProcessStartInfo("kill");
+                startInfo.ArgumentList.Add("-9");
+                startInfo.ArgumentList.Add(pid.ToString());
+                using var kill = Process.Start(startInfo);
+                kill?.WaitForExit(5000);
+            }
+            catch
+            {
+                // Best effort cleanup for a test process.
             }
         }
 
@@ -440,7 +450,29 @@ namespace Porta.Pty.Tests
                     connection.Kill();
                 }
 
-                await Task.WhenAny(Task.WhenAll(pending), Task.Delay(5000, cts.Token));
+                // The blocking Windows path is not promised to reach EOF on Kill alone; disposing
+                // closes its pipe. Teardown must be complete before the next measurement starts.
+                foreach (var connection in connections)
+                {
+                    connection.Dispose();
+                }
+
+                Task pendingReads = Task.WhenAll(pending);
+                Task completed = await Task.WhenAny(pendingReads, Task.Delay(5000, cts.Token));
+                if (completed != pendingReads)
+                {
+                    throw new TimeoutException("Pending PTY reads did not settle after Kill.");
+                }
+
+                try
+                {
+                    await pendingReads;
+                }
+                catch (IOException) when (!useAsyncIo && !IsWindows)
+                {
+                    // A blocking Linux controller reports child exit as EIO rather than EOF.
+                }
+
                 return new IdleCost(during - before, Math.Max(0, workersBefore - workersDuring));
             }
             finally
