@@ -237,14 +237,15 @@ namespace Porta.Pty.Windows
             {
                 if (options.UseAsyncIo)
                 {
-                    CreateOverlappedPipe(
-                        ourSideReads: false,
-                        out inPipeOurSide,
-                        out inPipePseudoConsoleSide);
-                    CreateOverlappedPipe(
-                        ourSideReads: true,
-                        out outPipeOurSide,
-                        out outPipePseudoConsoleSide);
+                    // CreatePipe hands back synchronous, NON-overlapped handles, and FileStream with
+                    // isAsync: true over a non-overlapped handle is invalid -- the very first
+                    // overlapped ReadFile would fail. So the async path builds each pipe by hand:
+                    // CreateNamedPipe with FILE_FLAG_OVERLAPPED for OUR end, CreateFile for the
+                    // ConPTY end. The ConPTY end stays synchronous on purpose; conhost services it
+                    // with its own machinery and never sees our overlapped flag. This is the same
+                    // construction System.Diagnostics.Process uses for async redirected stdio.
+                    (inPipeOurSide, inPipePseudoConsoleSide) = CreateOverlappedPipe(ourSideReads: false);
+                    (outPipeOurSide, outPipePseudoConsoleSide) = CreateOverlappedPipe(ourSideReads: true);
                 }
                 else
                 {
@@ -435,19 +436,34 @@ namespace Porta.Pty.Windows
             }
         }
 
-        private static void CreateOverlappedPipe(
-            bool ourSideReads,
-            out SafeFileHandle ourSide,
-            out SafeFileHandle pseudoConsoleSide)
+        /// <summary>
+        /// Creates a pipe whose LOCAL end is opened overlapped, so a FileStream over it can be
+        /// isAsync: true and reads are serviced by the I/O completion port with no thread pending.
+        /// </summary>
+        /// <param name="ourSideReads">True for the child's stdout pipe (we hold the read end);
+        /// false for the child's stdin pipe (we hold the write end).</param>
+        /// <returns>Our overlapped end, and the synchronous end to hand to CreatePseudoConsole.</returns>
+        /// <remarks>
+        /// A named pipe with a unique GUID name, because anonymous pipes cannot be overlapped --
+        /// CreatePipe has no flags parameter at all. The client connect needs no ConnectNamedPipe
+        /// first; a CreateFile against a listening instance succeeds immediately, which is the same
+        /// behaviour System.Diagnostics.Process relies on for async redirected stdio.
+        /// </remarks>
+        private static (SafeFileHandle OurSide, SafeFileHandle PseudoConsoleSide) CreateOverlappedPipe(bool ourSideReads)
         {
             string pipeName = $@"\\.\pipe\porta-pty-{Guid.NewGuid():N}";
             FILE_FLAGS_AND_ATTRIBUTES access = ourSideReads
                 ? FILE_FLAGS_AND_ATTRIBUTES.PIPE_ACCESS_INBOUND
                 : FILE_FLAGS_AND_ATTRIBUTES.PIPE_ACCESS_OUTBOUND;
 
-            ourSide = PInvoke.CreateNamedPipe(
+            SafeFileHandle ourSide = PInvoke.CreateNamedPipe(
                 pipeName,
-                access | FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_OVERLAPPED,
+                access
+                    | FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_OVERLAPPED
+                    // The GUID makes a collision negligible; this flag is what makes a SQUATTER
+                    // loud. If anything already owns the name, creation fails here rather than
+                    // quietly sharing a pipe with a stranger.
+                    | FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_FIRST_PIPE_INSTANCE,
                 NAMED_PIPE_MODE.PIPE_TYPE_BYTE
                     | NAMED_PIPE_MODE.PIPE_READMODE_BYTE
                     | NAMED_PIPE_MODE.PIPE_WAIT
@@ -471,7 +487,7 @@ namespace Porta.Pty.Windows
 
             try
             {
-                pseudoConsoleSide = PInvoke.CreateFile(
+                SafeFileHandle pseudoConsoleSide = PInvoke.CreateFile(
                     pipeName,
                     (uint)(ourSideReads
                         ? GENERIC_ACCESS_RIGHTS.GENERIC_WRITE
@@ -490,6 +506,8 @@ namespace Porta.Pty.Windows
                         "Could not open the ConPTY side of an overlapped named pipe",
                         new Win32Exception(errorCode));
                 }
+
+                return (ourSide, pseudoConsoleSide);
             }
             catch
             {

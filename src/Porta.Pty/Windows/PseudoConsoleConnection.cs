@@ -173,8 +173,18 @@ namespace Porta.Pty.Windows
             {
                 if (!this.isDisposed && this.handles?.UseAsyncIo == true)
                 {
-                    // ConPTY keeps its named-pipe client open after the child exits. Close it before
-                    // raising the event so a handler can safely drain ReaderStream through EOF.
+                    // Close the pseudoconsole as soon as the child is gone, so a pending overlapped
+                    // read completes instead of pending forever. Conhost holds the pipe ends OPEN
+                    // after the child exits, until ClosePseudoConsole -- measured directly: child
+                    // exit reported, read still pending 30 seconds later. Data conhost already wrote
+                    // is not lost; a pipe whose writer has gone drains what is buffered and THEN
+                    // reports broken, which FileStream surfaces as the 0-byte read the contract
+                    // requires. Closed BEFORE raising the event so a handler can drain through EOF.
+                    //
+                    // Async path only. The blocking path has always behaved this way and stays
+                    // untouched. Under the same lock Dispose uses for its flag, so the two callers
+                    // of PseudoConsole.Dispose cannot interleave: its idempotence guard is a plain
+                    // bool, safe only when calls are serialized.
                     this.handles.PseudoConsoleHandle.Dispose();
                 }
             }
