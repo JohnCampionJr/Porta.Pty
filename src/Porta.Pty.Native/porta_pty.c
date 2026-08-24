@@ -22,6 +22,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <termios.h>
 #include <sys/wait.h>
@@ -302,6 +303,30 @@ PTY_EXPORT int pty_close(int master_fd)
  * Returns:
  *   The current errno value
  */
+/*
+ * Puts the pty controller into non-blocking mode.
+ *
+ * This exists in the shim rather than as a libc P/Invoke because fcntl is VARIADIC --
+ * int fcntl(int, int, ...) -- and on Apple ARM64 variadic arguments are passed on the stack
+ * while fixed arguments are passed in registers. A P/Invoke declaring three fixed ints puts
+ * the third in a register, the callee reads the stack, and F_SETFL applies whatever junk was
+ * there. It then returns 0, so the caller is told the descriptor is non-blocking when it is
+ * not. Observed on macOS: asking for O_RDWR|O_NONBLOCK (0x6) produced flags of 0x400042.
+ *
+ * It happens to work on Linux, where both calling conventions pass integers in registers, so
+ * the failure is macOS-only and silent -- which is worse than a failure that is neither.
+ */
+PTY_EXPORT int pty_set_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1)
+    {
+        return -1;
+    }
+
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
 PTY_EXPORT int pty_get_errno(void)
 {
     return errno;
