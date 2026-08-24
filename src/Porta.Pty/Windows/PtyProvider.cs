@@ -18,6 +18,8 @@ namespace Porta.Pty.Windows
     // `using Windows.Win32` binds relative to it and looks for Porta.Pty.Windows.Windows.Win32.
     using global::Windows.Win32;
     using global::Windows.Win32.Foundation;
+    using global::Windows.Win32.Storage.FileSystem;
+    using global::Windows.Win32.System.Pipes;
     using global::Windows.Win32.System.Threading;
     using static Porta.Pty.Windows.NativeMethods;
 
@@ -224,17 +226,37 @@ namespace Porta.Pty.Windows
             // covered this by accident; PseudoConsole is a plain IDisposable, so the failure path has
             // to say so. Leaking one strands a conhost.exe (or OpenConsole.exe) per failed spawn.
             PseudoConsole? pseudoConsole = null;
+            SafeFileHandle? inPipePseudoConsoleSide = null;
+            SafeFileHandle? inPipeOurSide = null;
+            SafeFileHandle? outPipeOurSide = null;
+            SafeFileHandle? outPipePseudoConsoleSide = null;
+            SafeFileHandle? processHandle = null;
+            SafeFileHandle? mainThreadHandle = null;
 
             try
             {
-                if (!PInvoke.CreatePipe(out var inPipePseudoConsoleSide, out var inPipeOurSide, null, 0))
+                if (options.UseAsyncIo)
                 {
-                    throw new InvalidOperationException("Could not create an anonymous pipe", new Win32Exception());
+                    CreateOverlappedPipe(
+                        ourSideReads: false,
+                        out inPipeOurSide,
+                        out inPipePseudoConsoleSide);
+                    CreateOverlappedPipe(
+                        ourSideReads: true,
+                        out outPipeOurSide,
+                        out outPipePseudoConsoleSide);
                 }
-
-                if (!PInvoke.CreatePipe(out var outPipeOurSide, out var outPipePseudoConsoleSide, null, 0))
+                else
                 {
-                    throw new InvalidOperationException("Could not create an anonymous pipe", new Win32Exception());
+                    if (!PInvoke.CreatePipe(out inPipePseudoConsoleSide, out inPipeOurSide, null, 0))
+                    {
+                        throw new InvalidOperationException("Could not create an anonymous pipe", new Win32Exception());
+                    }
+
+                    if (!PInvoke.CreatePipe(out outPipeOurSide, out outPipePseudoConsoleSide, null, 0))
+                    {
+                        throw new InvalidOperationException("Could not create an anonymous pipe", new Win32Exception());
+                    }
                 }
 
                 // Either ConPTY implementation, chosen at runtime by PORTAPTY_CONPTY. See PseudoConsole.
@@ -282,8 +304,6 @@ namespace Porta.Pty.Windows
                         $"Starting terminal process '{app}' with command line {commandLine} "
                         + $"via {pseudoConsole.Implementation}");
 
-                    SafeFileHandle? processHandle = null;
-                    SafeFileHandle? mainThreadHandle = null;
                     int pid = 0;
                     bool success = false;
                     
@@ -388,7 +408,8 @@ namespace Porta.Pty.Windows
                         processHandle!,
                         pid,
                         mainThreadHandle!,
-                        jobObjectHandle);
+                        jobObjectHandle,
+                        options.UseAsyncIo);
 
                     var result = new PseudoConsoleConnection(connectionOptions);
                     AnswerDeviceAttributes(result, pseudoConsole);
@@ -403,7 +424,76 @@ namespace Porta.Pty.Windows
             {
                 // If anything fails, make sure to dispose the pseudoconsole and the job object
                 pseudoConsole?.Dispose();
+                inPipePseudoConsoleSide?.Dispose();
+                inPipeOurSide?.Dispose();
+                outPipeOurSide?.Dispose();
+                outPipePseudoConsoleSide?.Dispose();
+                mainThreadHandle?.Dispose();
+                processHandle?.Dispose();
                 jobObjectHandle?.Dispose();
+                throw;
+            }
+        }
+
+        private static void CreateOverlappedPipe(
+            bool ourSideReads,
+            out SafeFileHandle ourSide,
+            out SafeFileHandle pseudoConsoleSide)
+        {
+            string pipeName = $@"\\.\pipe\porta-pty-{Guid.NewGuid():N}";
+            FILE_FLAGS_AND_ATTRIBUTES access = ourSideReads
+                ? FILE_FLAGS_AND_ATTRIBUTES.PIPE_ACCESS_INBOUND
+                : FILE_FLAGS_AND_ATTRIBUTES.PIPE_ACCESS_OUTBOUND;
+
+            ourSide = PInvoke.CreateNamedPipe(
+                pipeName,
+                access | FILE_FLAGS_AND_ATTRIBUTES.FILE_FLAG_OVERLAPPED,
+                NAMED_PIPE_MODE.PIPE_TYPE_BYTE
+                    | NAMED_PIPE_MODE.PIPE_READMODE_BYTE
+                    | NAMED_PIPE_MODE.PIPE_WAIT
+                    | NAMED_PIPE_MODE.PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                // Unlike CreatePipe, zero here gives an overlapped writer no quota and its first
+                // write waits for a reader. This is the standard CreatePipeEx default.
+                4096,
+                4096,
+                0,
+                null);
+
+            if (ourSide.IsInvalid)
+            {
+                int errorCode = Marshal.GetLastWin32Error();
+                ourSide.Dispose();
+                throw new InvalidOperationException(
+                    "Could not create an overlapped named pipe",
+                    new Win32Exception(errorCode));
+            }
+
+            try
+            {
+                pseudoConsoleSide = PInvoke.CreateFile(
+                    pipeName,
+                    (uint)(ourSideReads
+                        ? GENERIC_ACCESS_RIGHTS.GENERIC_WRITE
+                        : GENERIC_ACCESS_RIGHTS.GENERIC_READ),
+                    FILE_SHARE_MODE.FILE_SHARE_NONE,
+                    null,
+                    FILE_CREATION_DISPOSITION.OPEN_EXISTING,
+                    FILE_FLAGS_AND_ATTRIBUTES.FILE_ATTRIBUTE_NORMAL,
+                    null!);
+
+                if (pseudoConsoleSide.IsInvalid)
+                {
+                    int errorCode = Marshal.GetLastWin32Error();
+                    pseudoConsoleSide.Dispose();
+                    throw new InvalidOperationException(
+                        "Could not open the ConPTY side of an overlapped named pipe",
+                        new Win32Exception(errorCode));
+                }
+            }
+            catch
+            {
+                ourSide.Dispose();
                 throw;
             }
         }

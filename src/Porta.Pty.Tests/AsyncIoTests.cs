@@ -32,19 +32,10 @@ namespace Porta.Pty.Tests
 
         private static bool IsWindows => RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 
-        [TestInitialize]
-        public void SkipUntilWindowsIsImplemented()
-        {
-            if (IsWindows)
-            {
-                // UseAsyncIo has no Windows implementation yet, so every promise this class makes is
-                // knowingly false there. Worth being explicit rather than leaving it: the thread-cost
-                // tests PASSED on Windows CI while the option did nothing, because the pool already
-                // had threads to hand out. A test that passes for a reason unrelated to what it
-                // claims is worse than one that fails.
-                Assert.Inconclusive("UseAsyncIo is not implemented on Windows yet.");
-            }
-        }
+        private static string Prompt => IsWindows ? ">" : "$";
+
+        private static byte[] Command(string command) =>
+            Encoding.UTF8.GetBytes(command + (IsWindows ? "\r\n" : "\n"));
 
         private static PtyOptions Shell(string name, bool useAsyncIo)
         {
@@ -69,7 +60,7 @@ namespace Porta.Pty.Tests
             using var cts = new CancellationTokenSource(TestTimeoutMs);
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(Shell("AsyncRoundTrip", useAsyncIo: true), cts.Token);
 
-            byte[] command = Encoding.UTF8.GetBytes("echo ASYNC_MARKER\n");
+            byte[] command = Command("echo ASYNC_MARKER");
             await terminal.WriterStream.WriteAsync(command, 0, command.Length, cts.Token);
 
             string output = await ReadUntilAsync(terminal, "ASYNC_MARKER", TimeSpan.FromSeconds(15));
@@ -87,7 +78,7 @@ namespace Porta.Pty.Tests
             using var cts = new CancellationTokenSource(TestTimeoutMs);
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(Shell("AsyncEof", useAsyncIo: true), cts.Token);
 
-            byte[] command = Encoding.UTF8.GetBytes("exit\n");
+            byte[] command = Command("exit");
             await terminal.WriterStream.WriteAsync(command, 0, command.Length, cts.Token);
 
             var buffer = new byte[4096];
@@ -111,7 +102,7 @@ namespace Porta.Pty.Tests
             using var cts = new CancellationTokenSource(TestTimeoutMs);
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(Shell("AsyncCancel", useAsyncIo: true), cts.Token);
 
-            await ReadUntilAsync(terminal, "$", TimeSpan.FromSeconds(5));
+            await ReadUntilAsync(terminal, Prompt, TimeSpan.FromSeconds(5));
 
             using var readCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
             var buffer = new byte[4096];
@@ -128,13 +119,8 @@ namespace Porta.Pty.Tests
         [TestMethod]
         public async Task AsyncIo_ReportsTheRealExitCode()
         {
-            // The shared reaper decodes the same wait status the per-connection watcher did, but by a
-            // new route. A reaper that always reported 0 would satisfy every other test here.
-            if (IsWindows)
-            {
-                Assert.Inconclusive("Unix-only: the shared reaper is the Unix waitpid path.");
-                return;
-            }
+            // Unix's shared reaper and Windows's registered process wait both have to preserve the
+            // real exit code. Always reporting 0 would satisfy every other test here.
 
             using var cts = new CancellationTokenSource(TestTimeoutMs);
             using IPtyConnection terminal = await PtyProvider.SpawnAsync(Shell("AsyncExitCode", useAsyncIo: true), cts.Token);
@@ -147,11 +133,11 @@ namespace Porta.Pty.Tests
             // never fired.
             var drain = ReadUntilAsync(terminal, "\u0000never\u0000", TimeSpan.FromSeconds(15));
 
-            byte[] command = Encoding.UTF8.GetBytes("exit 42\n");
+            byte[] command = Command("exit 42");
             await terminal.WriterStream.WriteAsync(command, 0, command.Length, cts.Token);
 
             var reported = await Task.WhenAny(exited.Task, Task.Delay(TimeSpan.FromSeconds(15), cts.Token));
-            reported.Should().Be(exited.Task, "the reaper has to raise ProcessExited, not merely notice the exit");
+            reported.Should().Be(exited.Task, "the child watch has to raise ProcessExited, not merely notice the exit");
             await drain;
 
             (await exited.Task).Should().Be(42, "the event must carry the child's real exit code");
@@ -178,7 +164,7 @@ namespace Porta.Pty.Tests
 
             var drain = ReadUntilAsync(terminal, "\u0000never\u0000", TimeSpan.FromSeconds(15));
 
-            byte[] command = Encoding.UTF8.GetBytes("exit 42\n");
+            byte[] command = Command("exit 42");
             terminal.WriterStream.Write(command, 0, command.Length);
             terminal.WriterStream.Flush();
 
@@ -191,6 +177,12 @@ namespace Porta.Pty.Tests
         [TestMethod]
         public async Task AsyncIo_ReapsTheChild_WhenDisposedWithoutWaiting()
         {
+            if (IsWindows)
+            {
+                Assert.Inconclusive("Unix-only: exercises SIGHUP/SIGKILL handling and zombie state.");
+                return;
+            }
+
             // Dispose signals the child but does not collect it, and a signalled child is not a
             // reaped one -- it stays a zombie until somebody waits on it. Dropping the reaper
             // registration here meant nothing ever did.
@@ -316,7 +308,7 @@ namespace Porta.Pty.Tests
             for (var i = 0; i < Rounds; i++)
             {
                 using IPtyConnection terminal = await PtyProvider.SpawnAsync(Shell($"Churn{i}", useAsyncIo: true), cts.Token);
-                await ReadUntilAsync(terminal, "$", TimeSpan.FromSeconds(5));
+                await ReadUntilAsync(terminal, Prompt, TimeSpan.FromSeconds(5));
                 terminal.Kill();
                 terminal.WaitForExit(2000);
             }
@@ -350,22 +342,30 @@ namespace Porta.Pty.Tests
         public async Task AsyncIo_ThreadCostDoesNotScaleWithSessionCount()
         {
             // The property worth pinning, and the one a comparison against blocking I/O does not
-            // state: the cost is a CONSTANT -- one poller and one reaper for the process -- rather
-            // than a smaller per-session number. Measured at two sizes because a per-session cost of
-            // one thread and a constant cost of two are indistinguishable at a single size.
+            // state: the cost is CONSTANT process-wide infrastructure rather than a smaller
+            // per-session number. Measured at two sizes because a per-session cost of one thread and
+            // a constant cost of two are indistinguishable at a single size.
             await WarmUpSharedThreadsAsync();
 
-            int small = await MeasureIdleThreadGrowthAsync(6, useAsyncIo: true);
-            int large = await MeasureIdleThreadGrowthAsync(24, useAsyncIo: true);
+            IdleCost small = await MeasureIdleCostAsync(6, useAsyncIo: true);
+            IdleCost large = await MeasureIdleCostAsync(24, useAsyncIo: true);
 
-            Console.WriteLine($"async idle thread growth: 6 sessions={small}, 24 sessions={large}");
+            Console.WriteLine(
+                $"async idle cost: 6 sessions=+{small.Threads} threads/{small.Workers} workers, " +
+                $"24 sessions=+{large.Threads} threads/{large.Workers} workers");
 
-            large.Should().BeLessThanOrEqualTo(
-                small + 2,
-                "quadrupling the session count must not multiply the thread count; the poller and reaper are shared");
-            large.Should().BeLessThan(
+            large.Threads.Should().BeLessThanOrEqualTo(
+                small.Threads + 2,
+                "quadrupling the session count must not multiply the process-wide I/O/watch infrastructure");
+            large.Threads.Should().BeLessThan(
                 6,
                 "24 idle sessions should cost a handful of threads at most, not one apiece");
+            large.Workers.Should().BeLessThanOrEqualTo(
+                small.Workers + 2,
+                "cached thread-pool threads must not hide one occupied worker per session");
+            large.Workers.Should().BeLessThan(
+                6,
+                "24 pending reads should occupy a handful of workers at most, not one apiece");
         }
 
         [TestMethod]
@@ -375,33 +375,39 @@ namespace Porta.Pty.Tests
 
             await WarmUpSharedThreadsAsync();
 
-            int blocking = await MeasureIdleThreadGrowthAsync(Sessions, useAsyncIo: false);
-            int asyncIo = await MeasureIdleThreadGrowthAsync(Sessions, useAsyncIo: true);
+            IdleCost blocking = await MeasureIdleCostAsync(Sessions, useAsyncIo: false);
+            IdleCost asyncIo = await MeasureIdleCostAsync(Sessions, useAsyncIo: true);
 
-            Console.WriteLine($"idle thread growth for {Sessions} sessions: blocking={blocking} asyncIo={asyncIo}");
+            Console.WriteLine(
+                $"idle cost for {Sessions} sessions: " +
+                $"blocking=+{blocking.Threads} threads/{blocking.Workers} workers " +
+                $"asyncIo=+{asyncIo.Threads} threads/{asyncIo.Workers} workers");
 
-            asyncIo.Should().BeLessThan(
-                blocking,
+            asyncIo.Threads.Should().BeLessThan(
+                blocking.Threads,
                 "neither the reads nor the child watch should hold a thread per session");
+            asyncIo.Workers.Should().BeLessThan(
+                blocking.Workers,
+                "IOCP reads should not occupy cached thread-pool workers while idle");
         }
 
         /// <summary>
-        /// Starts the shared poller and reaper before anything is measured.
+        /// Starts the platform's shared async infrastructure before anything is measured.
         /// </summary>
         /// <remarks>
-        /// They are created on first use, so without this the first measurement carries their two
-        /// threads and reads as a per-session cost that is not one.
+        /// Unix creates its poller and reaper on first use; Windows initializes IOCP and process-wait
+        /// infrastructure lazily. Without this the first measurement includes one-time startup cost.
         /// </remarks>
         private static async Task WarmUpSharedThreadsAsync()
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
             using IPtyConnection warm = await PtyProvider.SpawnAsync(Shell("WarmUp", useAsyncIo: true), cts.Token);
-            await ReadUntilAsync(warm, "$", TimeSpan.FromSeconds(5));
+            await ReadUntilAsync(warm, Prompt, TimeSpan.FromSeconds(5));
             warm.Kill();
             warm.WaitForExit(5000);
         }
 
-        private static async Task<int> MeasureIdleThreadGrowthAsync(int sessions, bool useAsyncIo)
+        private static async Task<IdleCost> MeasureIdleCostAsync(int sessions, bool useAsyncIo)
         {
             using var cts = new CancellationTokenSource(TestTimeoutMs);
             var connections = new List<IPtyConnection>();
@@ -412,13 +418,14 @@ namespace Porta.Pty.Tests
                 // it is still reacting to the previous phase is noise.
                 await Task.Delay(1500, cts.Token);
                 int before = Process.GetCurrentProcess().Threads.Count;
+                ThreadPool.GetAvailableThreads(out int workersBefore, out _);
 
                 for (var i = 0; i < sessions; i++)
                 {
                     connections.Add(await PtyProvider.SpawnAsync(Shell($"Idle{i}", useAsyncIo), cts.Token));
                 }
 
-                await Task.WhenAll(connections.Select(c => ReadUntilAsync(c, "$", TimeSpan.FromSeconds(5))));
+                await Task.WhenAll(connections.Select(c => ReadUntilAsync(c, Prompt, TimeSpan.FromSeconds(5))));
 
                 var pending = connections
                     .Select(c => c.ReaderStream.ReadAsync(new byte[256], 0, 256, cts.Token))
@@ -426,6 +433,7 @@ namespace Porta.Pty.Tests
 
                 await Task.Delay(2500, cts.Token);
                 int during = Process.GetCurrentProcess().Threads.Count;
+                ThreadPool.GetAvailableThreads(out int workersDuring, out _);
 
                 foreach (var connection in connections)
                 {
@@ -433,7 +441,7 @@ namespace Porta.Pty.Tests
                 }
 
                 await Task.WhenAny(Task.WhenAll(pending), Task.Delay(5000, cts.Token));
-                return during - before;
+                return new IdleCost(during - before, Math.Max(0, workersBefore - workersDuring));
             }
             finally
             {
@@ -443,6 +451,8 @@ namespace Porta.Pty.Tests
                 }
             }
         }
+
+        private readonly record struct IdleCost(int Threads, int Workers);
 
         private static async Task<string> ReadUntilAsync(IPtyConnection terminal, string needle, TimeSpan timeout)
         {
