@@ -72,6 +72,11 @@ namespace Porta.Pty
         /// Opt-in because it changes the I/O path underneath every existing consumer. The default
         /// path is unchanged: a blocking descriptor, and ReadAsync serviced by the thread pool.
         ///
+        /// Needs Linux 5.3 or newer, for the pidfd_open used to watch a child exit; spawning with
+        /// this set throws PlatformNotSupportedException on anything older rather than quietly
+        /// falling back to something slower. Of the distributions .NET 10 supports, only RHEL 8
+        /// ships an older kernel. macOS and Windows have no such floor.
+        ///
         /// Synchronous Read and Write keep working either way, and still block the calling thread.
         /// This is about what ASYNC costs, not about removing the sync API.
         /// </remarks>

@@ -172,6 +172,67 @@ namespace Porta.Pty.Tests
         }
 
         [TestMethod]
+        public async Task AsyncIo_ReportsExitPromptly_NotOnAPollingInterval()
+        {
+            // The reason the kernel path exists. The reaper used to ask waitpid every 100ms, and
+            // since its callback is what raises ProcessExited, that interval was latency a caller
+            // could feel -- roughly 50ms on average, up to 100.
+            //
+            // The bound is deliberately far below what polling would produce and far above what was
+            // measured (3-6ms on macOS), so it fails if the kernel path silently stops being used
+            // without being sensitive to a slow agent.
+            if (IsWindows)
+            {
+                Assert.Inconclusive("Unix-only: Windows exit reporting was never on an interval.");
+                return;
+            }
+
+            using var cts = new CancellationTokenSource(TestTimeoutMs);
+
+            // Warm the shared machinery so the first sample is not measuring its creation.
+            using (var warm = await PtyProvider.SpawnAsync(ExitImmediately("Warm"), cts.Token))
+            {
+                warm.WaitForExit(5000);
+            }
+
+            var samples = new List<double>();
+            for (var i = 0; i < 5; i++)
+            {
+                var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                using IPtyConnection terminal = await PtyProvider.SpawnAsync(ExitImmediately($"Latency{i}"), cts.Token);
+
+                var stopwatch = Stopwatch.StartNew();
+                terminal.ProcessExited += (_, _) => exited.TrySetResult();
+
+                // Drained, so the child is never held up writing.
+                var drain = ReadUntilAsync(terminal, "\u0000never\u0000", TimeSpan.FromSeconds(5));
+
+                await Task.WhenAny(exited.Task, Task.Delay(TimeSpan.FromSeconds(5), cts.Token));
+                stopwatch.Stop();
+
+                exited.Task.IsCompletedSuccessfully.Should().BeTrue("the exit has to be reported at all");
+                samples.Add(stopwatch.Elapsed.TotalMilliseconds);
+                await drain;
+            }
+
+            samples.Sort();
+            var median = samples[samples.Count / 2];
+            Console.WriteLine($"exit latency ms: {string.Join(", ", samples.ConvertAll(v => v.ToString("F1")))}");
+
+            median.Should().BeLessThan(
+                40,
+                "exit is reported by the kernel now, not discovered on a 100ms poll");
+        }
+
+        private static PtyOptions ExitImmediately(string name)
+        {
+            var options = Shell(name, useAsyncIo: true);
+            options.CommandLine = IsWindows ? new[] { "/c", "exit 7" } : new[] { "-c", "exit 7" };
+            options.VerbatimCommandLine = true;
+            return options;
+        }
+
+        [TestMethod]
         public async Task AsyncIo_RefusesIo_AfterDispose()
         {
             // The disposed flag was written and never read, so a read issued after Dispose still

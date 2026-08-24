@@ -60,6 +60,19 @@ namespace Porta.Pty.Unix
                         + $"{Marshal.GetLastWin32Error()}).");
                 }
 
+                if (!PtyReaper.Instance.IsSupported)
+                {
+                    // Refused rather than quietly polling instead. The exit notification this option
+                    // depends on needs Linux 5.3 for pidfd_open; of the distributions .NET 10
+                    // supports, only RHEL 8 is older. Carrying a polling fallback for that would mean
+                    // shipping a second implementation that CI can never exercise, so the option
+                    // says no and the default blocking path -- unchanged, and working everywhere --
+                    // remains available.
+                    throw new PlatformNotSupportedException(
+                        $"{nameof(PtyOptions.UseAsyncIo)} needs kernel support for watching a child "
+                        + "process exit, which on Linux means pidfd_open and so kernel 5.3 or newer.");
+                }
+
                 // Both streams share the one descriptor, so the mode is a property of the connection
                 // rather than of either stream.
                 this.ReaderStream = new NonBlockingPtyStream(controller, FileAccess.Read);
