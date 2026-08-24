@@ -58,6 +58,7 @@ namespace Porta.Pty.Unix
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                this.ThrowIfDisposed();
 
                 int read = this.TryTransfer(buffer, offset, count, reading: true, out int error);
                 if (read >= 0)
@@ -68,6 +69,12 @@ namespace Porta.Pty.Unix
                 if (error == EAgain)
                 {
                     await PtyPoller.Instance.WaitReadableAsync(this.fd, cancellationToken).ConfigureAwait(false);
+
+                    // Re-checked after the wait, not only before it. Dispose completes pending
+                    // waiters through Unregister, so without this the loop woke, saw EAGAIN again,
+                    // and registered itself once more -- spinning on a descriptor the connection had
+                    // already closed, forever.
+                    this.ThrowIfDisposed();
                     continue;
                 }
 
@@ -100,6 +107,7 @@ namespace Porta.Pty.Unix
             while (count > 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                this.ThrowIfDisposed();
 
                 int written = this.TryTransfer(buffer, offset, count, reading: false, out int error);
                 if (written >= 0)
@@ -112,6 +120,7 @@ namespace Porta.Pty.Unix
                 if (error == EAgain)
                 {
                     await PtyPoller.Instance.WaitWritableAsync(this.fd, cancellationToken).ConfigureAwait(false);
+                    this.ThrowIfDisposed();
                     continue;
                 }
 
@@ -151,6 +160,22 @@ namespace Porta.Pty.Unix
         }
 
         private const int EIoError = 5;
+
+        /// <summary>
+        /// Refuses I/O once the connection has closed the descriptor.
+        /// </summary>
+        /// <remarks>
+        /// This stream does not OWN the descriptor -- the connection does, and closes it -- so
+        /// nothing stopped a read issued afterwards from calling read(2) on a number the process may
+        /// since have handed to an unrelated file. The disposed flag existed and was never read.
+        /// </remarks>
+        private void ThrowIfDisposed()
+        {
+            if (Volatile.Read(ref this.disposed) != 0)
+            {
+                throw new ObjectDisposedException(nameof(NonBlockingPtyStream));
+            }
+        }
 
         private unsafe int TryTransfer(byte[] buffer, int offset, int count, bool reading, out int error)
         {

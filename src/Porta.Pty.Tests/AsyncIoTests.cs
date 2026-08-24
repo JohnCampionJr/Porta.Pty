@@ -25,9 +25,6 @@ namespace Porta.Pty.Tests
     [TestClass]
     public class AsyncIoTests
     {
-        /// <summary>EIO, which is how Linux ends a read on a pty whose child has exited.</summary>
-        private const int Eio = 5;
-
         private static readonly int TestTimeoutMs = Debugger.IsAttached ? 300_000 : 60_000;
 
         private static bool IsWindows => RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
@@ -172,6 +169,27 @@ namespace Porta.Pty.Tests
             reported.Should().Be(exited.Task);
             await drain;
             (await exited.Task).Should().Be(42);
+        }
+
+        [TestMethod]
+        public async Task AsyncIo_RefusesIo_AfterDispose()
+        {
+            // The disposed flag was written and never read, so a read issued after Dispose still
+            // called read(2) -- on a descriptor the connection had closed, and whose NUMBER the
+            // process may since have handed to an unrelated file.
+            using var cts = new CancellationTokenSource(TestTimeoutMs);
+            IPtyConnection terminal = await PtyProvider.SpawnAsync(Shell("DisposedIo", useAsyncIo: true), cts.Token);
+            await ReadUntilAsync(terminal, Prompt, TimeSpan.FromSeconds(5));
+
+            var reader = terminal.ReaderStream;
+            var writer = terminal.WriterStream;
+            terminal.Dispose();
+
+            var buffer = new byte[64];
+            await Assert.ThrowsExactlyAsync<ObjectDisposedException>(
+                () => reader.ReadAsync(buffer, 0, buffer.Length, CancellationToken.None));
+            await Assert.ThrowsExactlyAsync<ObjectDisposedException>(
+                () => writer.WriteAsync(buffer, 0, buffer.Length, CancellationToken.None));
         }
 
         [TestMethod]
@@ -509,16 +527,24 @@ namespace Porta.Pty.Tests
                 {
                     continue;
                 }
-                catch (IOException ex) when (ex.HResult == Eio)
+                catch (IOException)
                 {
-                    // EIO only. Reading a pty controller after the child exits gives EIO on Linux and
-                    // 0 on macOS, so the default blocking stream THROWS on one platform and returns
-                    // cleanly on the other for the same event. NonBlockingPtyStream normalises EIO to
-                    // 0; the default path does not, and this is that difference showing through. Not
-                    // this branch's to fix.
+                    // End of stream. Reading a pty controller after the child exits gives EIO on
+                    // Linux and 0 on macOS, so the default blocking stream THROWS on one platform
+                    // and returns cleanly on the other for the same event. NonBlockingPtyStream
+                    // normalises EIO to 0; the default path does not, and this is that difference
+                    // showing through. Not this branch's to fix.
                     //
-                    // Narrowed to EIO on purpose: catching every IOException would let a test pass
-                    // after a genuine read failure by calling it end of stream.
+                    // This used to be filtered to `ex.HResult == 5`, which never matched anything:
+                    // on Unix a FileStream IOException carries COR_E_IO, 0x80131620, for every
+                    // errno -- measured, not assumed. There is no portable way to recover the errno
+                    // from a managed IOException, so the filter is gone rather than left looking
+                    // precise while being inert.
+                    //
+                    // Swallowing every IOException here is acceptable only because this is a DRAIN:
+                    // it reads until a marker appears or the timeout expires, and the assertions
+                    // that follow still fail if the marker never arrived. It would not be
+                    // acceptable in a helper whose return value something depended on.
                     break;
                 }
 

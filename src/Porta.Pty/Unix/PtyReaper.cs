@@ -5,6 +5,7 @@ namespace Porta.Pty.Unix
 {
     using System;
     using System.Collections.Generic;
+    using System.Runtime.InteropServices;
     using System.Threading;
 
     /// <summary>
@@ -22,18 +23,25 @@ namespace Porta.Pty.Unix
     /// space with code it does not control cannot claim every child. So this waits on the pids it was
     /// given, one at a time, with WNOHANG.
     ///
-    /// Which makes it a poll, and the interval is a real cost: an exit is not observed until the next
-    /// pass. That is affordable because it is not the signal anyone waits on -- the pty goes readable
-    /// then EOF the moment the child dies, so a reader already knows. This is only collecting the
-    /// exit CODE, and a hundred milliseconds of latency on that is invisible. The alternative that
-    /// avoids polling entirely is per-pid kernel notification, which is kqueue EVFILT_PROC on macOS
-    /// and pidfd_open plus poll on Linux -- two more platform paths for a latency nobody is measuring.
+    /// Which makes it a poll, and the interval is a real, user-visible cost. An earlier version of
+    /// this comment claimed otherwise -- that nobody waits on it, because a reader sees EOF the
+    /// moment the child dies. That is wrong: this callback is the ONLY thing that sets the
+    /// terminated event and raises ProcessExited, so WaitForExit and every event subscriber wait on
+    /// exactly this interval. Budget up to Interval of extra latency on both, on top of however long
+    /// the child took to die.
+    ///
+    /// It is still the right trade for a terminal, where a tenth of a second on a session ending is
+    /// not perceptible, but it is a trade rather than a free lunch. Avoiding the poll means per-pid
+    /// kernel notification -- kqueue EVFILT_PROC on macOS, pidfd_open plus poll on Linux -- which is
+    /// two more platform paths, and worth taking if that latency ever matters to someone.
     /// </remarks>
     internal sealed class PtyReaper
     {
         /// <summary>
         /// How long a child may lie dead before its status is collected.
         /// </summary>
+        private const int EINTR = 4;
+
         private static readonly TimeSpan Interval = TimeSpan.FromMilliseconds(100);
 
         private static readonly Lazy<PtyReaper> InstanceHolder =
@@ -111,19 +119,31 @@ namespace Porta.Pty.Unix
                 {
                     int status = 0;
                     int result;
+                    int error = 0;
                     try
                     {
                         result = pair.Value.Attempt(pair.Key, ref status);
+                        error = result < 0 ? Marshal.GetLastPInvokeError() : 0;
                     }
                     catch
                     {
                         // A torn-down connection can race us; drop it rather than take the process
                         // down from a background thread.
                         result = -1;
+                        error = 0;
                     }
 
                     if (result == 0)
                     {
+                        continue;
+                    }
+
+                    if (result < 0 && error == EINTR)
+                    {
+                        // A signal arrived during the call, which says nothing about the child.
+                        // Dropping the registration here left it unreaped forever, and since this
+                        // callback is what sets the terminated event, WaitForExit and ProcessExited
+                        // would never complete. The blocking watcher retries on EINTR; so does this.
                         continue;
                     }
 

@@ -44,12 +44,24 @@ namespace Porta.Pty.Unix
         /// <param name="useAsyncIo">Whether async reads and writes should avoid holding a thread.</param>
         public PtyConnection(int controller, int pid, bool useAsyncIo)
         {
-            if (useAsyncIo && NativeIo.SetNonBlocking(controller))
+            if (useAsyncIo)
             {
-                // Both streams share the one descriptor, so the mode is a property of the
-                // connection rather than of either stream. If the fcntl fails there is nothing to
-                // recover -- fall back to the blocking pair rather than run non-blocking code over a
-                // blocking descriptor, which would block inside the poller's own read.
+                if (!NativeIo.SetNonBlocking(controller))
+                {
+                    // Throws rather than falling back to the blocking pair. The fallback looked like
+                    // the careful choice and was the opposite: UseAsyncIo publicly guarantees that a
+                    // pending read holds no thread, the shared reaper still made the option appear
+                    // enabled, and a caller holding hundreds of sessions had no way to discover it
+                    // had silently gone back to a thread apiece. A spawn that cannot honour what was
+                    // asked for should say so.
+                    throw new InvalidOperationException(
+                        "Could not put the pty controller into non-blocking mode, which "
+                        + $"{nameof(PtyOptions.UseAsyncIo)} requires (errno "
+                        + $"{Marshal.GetLastWin32Error()}).");
+                }
+
+                // Both streams share the one descriptor, so the mode is a property of the connection
+                // rather than of either stream.
                 this.ReaderStream = new NonBlockingPtyStream(controller, FileAccess.Read);
                 this.WriterStream = new NonBlockingPtyStream(controller, FileAccess.Write);
             }
