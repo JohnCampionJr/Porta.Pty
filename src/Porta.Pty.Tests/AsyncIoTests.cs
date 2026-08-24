@@ -29,6 +29,20 @@ namespace Porta.Pty.Tests
 
         private static bool IsWindows => RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 
+        [TestInitialize]
+        public void SkipUntilWindowsIsImplemented()
+        {
+            if (IsWindows)
+            {
+                // UseAsyncIo has no Windows implementation yet, so every promise this class makes is
+                // knowingly false there. Worth being explicit rather than leaving it: the thread-cost
+                // tests PASSED on Windows CI while the option did nothing, because the pool already
+                // had threads to hand out. A test that passes for a reason unrelated to what it
+                // claims is worse than one that fails.
+                Assert.Inconclusive("UseAsyncIo is not implemented on Windows yet.");
+            }
+        }
+
         private static PtyOptions Shell(string name, bool useAsyncIo)
         {
             return new PtyOptions
@@ -334,6 +348,15 @@ namespace Porta.Pty.Tests
                 catch (OperationCanceledException)
                 {
                     continue;
+                }
+                catch (IOException)
+                {
+                    // End of stream, on Linux. Reading a pty controller after the child exits gives
+                    // EIO there and 0 on macOS, so the default blocking stream THROWS on one platform
+                    // and returns cleanly on the other for the same event. NonBlockingPtyStream
+                    // normalises EIO to 0; the default path does not, and this is the difference
+                    // showing through. Not this branch's to fix, but worth knowing it exists.
+                    break;
                 }
 
                 if (read == 0)
