@@ -50,6 +50,12 @@ namespace Porta.Pty.Linux
         }
 
         /// <inheritdoc/>
+        protected override int WaitPidNoHang(int pid, ref int status)
+        {
+            return pty_waitpid(pid, ref status, WNOHANG);
+        }
+
+        /// <inheritdoc/>
         protected override bool WaitPid(int pid, ref int status)
         {
             return pty_waitpid(pid, ref status, 0) != -1;

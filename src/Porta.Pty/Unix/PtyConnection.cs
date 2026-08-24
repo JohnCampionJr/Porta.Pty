@@ -24,6 +24,7 @@ namespace Porta.Pty.Unix
         private int exitCode;
         private int exitSignal;
         private bool isDisposed;
+        private readonly bool usesSharedReaper;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="PtyConnection"/> class.
@@ -60,14 +61,26 @@ namespace Porta.Pty.Unix
 
             this.controller = controller;
             this.pid = pid;
-            var childWatcherThread = new Thread(this.ChildWatcherThreadProc)
-            {
-                IsBackground = true,
-                Priority = ThreadPriority.Lowest,
-                Name = $"Watcher thread for child process {pid}",
-            };
+            this.usesSharedReaper = useAsyncIo;
 
-            childWatcherThread.Start();
+            if (useAsyncIo)
+            {
+                // One reaper for the whole process instead of a thread apiece. This is the half that
+                // actually moves the number: making reads threadless still left a watcher per
+                // connection blocked in waitpid.
+                PtyReaper.Instance.Register(pid, this.WaitPidNoHang, this.OnChildExited);
+            }
+            else
+            {
+                var childWatcherThread = new Thread(this.ChildWatcherThreadProc)
+                {
+                    IsBackground = true,
+                    Priority = ThreadPriority.Lowest,
+                    Name = $"Watcher thread for child process {pid}",
+                };
+
+                childWatcherThread.Start();
+            }
         }
 
         /// <inheritdoc/>
@@ -116,6 +129,13 @@ namespace Porta.Pty.Unix
             // Found because moving this suite into a single MTP process ran four 24-spawn tests
             // back to back and the third started failing; each test alone had always been fine.
             this.TryClose();
+
+            if (this.usesSharedReaper)
+            {
+                // The pid may already be gone, in which case this is a no-op. Leaving it registered
+                // would keep the reaper waiting on a child nobody is listening for.
+                PtyReaper.Instance.Unregister(this.pid);
+            }
         }
 
         /// <inheritdoc/>
@@ -169,6 +189,14 @@ namespace Porta.Pty.Unix
         /// <param name="controller">The fd of the pty controller.</param>
         /// <returns>True if the fd was closed, false otherwise.</returns>
         protected abstract bool Close(int controller);
+
+        /// <summary>
+        /// OS-specific waitpid that does not block, for the shared reaper.
+        /// </summary>
+        /// <param name="pid">The process id to check.</param>
+        /// <param name="status">The status of the process, when it has one.</param>
+        /// <returns>The pid once it has exited, 0 while it is still running, -1 on failure.</returns>
+        protected abstract int WaitPidNoHang(int pid, ref int status);
 
         /// <summary>
         /// OS-specific implementation of waiting on the given process id.
@@ -235,6 +263,18 @@ namespace Porta.Pty.Unix
             }
 
             Debug.WriteLine($"Wait succeeded");
+            this.OnChildExited(status);
+        }
+
+        /// <summary>
+        /// Records an exit status and tells anyone waiting. Shared by the per-connection watcher and
+        /// the process-wide reaper, so the two paths cannot drift.
+        /// </summary>
+        private void OnChildExited(int status)
+        {
+            const int SignalMask = 127;
+            const int ExitCodeMask = 255;
+
             this.exitSignal = status & SignalMask;
             this.exitCode = this.exitSignal == 0 ? (status >> 8) & ExitCodeMask : 0;
             this.terminalProcessTerminatedEvent.Set();

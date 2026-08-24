@@ -109,12 +109,143 @@ namespace Porta.Pty.Tests
         }
 
         [TestMethod]
+        public async Task AsyncIo_ReportsTheRealExitCode()
+        {
+            // The shared reaper decodes the same wait status the per-connection watcher did, but by a
+            // new route. A reaper that always reported 0 would satisfy every other test here.
+            if (IsWindows)
+            {
+                Assert.Inconclusive("Unix-only: the shared reaper is the Unix waitpid path.");
+                return;
+            }
+
+            using var cts = new CancellationTokenSource(TestTimeoutMs);
+            using IPtyConnection terminal = await PtyProvider.SpawnAsync(Shell("AsyncExitCode", useAsyncIo: true), cts.Token);
+
+            var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            terminal.ProcessExited += (_, e) => exited.TrySetResult(e.ExitCode);
+
+            // Drain while waiting. An undrained pty eventually stops the child mid-write, and a
+            // child stopped mid-write never reaches exit -- which looks exactly like a reaper that
+            // never fired.
+            var drain = ReadUntilAsync(terminal, "\u0000never\u0000", TimeSpan.FromSeconds(15));
+
+            byte[] command = Encoding.UTF8.GetBytes("exit 42\n");
+            await terminal.WriterStream.WriteAsync(command, 0, command.Length, cts.Token);
+
+            var reported = await Task.WhenAny(exited.Task, Task.Delay(TimeSpan.FromSeconds(15), cts.Token));
+            reported.Should().Be(exited.Task, "the reaper has to raise ProcessExited, not merely notice the exit");
+            await drain;
+
+            (await exited.Task).Should().Be(42, "the event must carry the child's real exit code");
+            terminal.ExitCode.Should().Be(42);
+            terminal.WaitForExit(5000).Should().BeTrue("WaitForExit must be satisfied by the shared reaper too");
+        }
+
+        [TestMethod]
+        public async Task AsyncIo_ReportsExitCode_ForABlockingConnectionToo()
+        {
+            // The default path still uses its own watcher thread. Both routes decode the status, so
+            // both are checked, or a change to one could silently diverge from the other.
+            if (IsWindows)
+            {
+                Assert.Inconclusive("Unix-only: compares the two Unix waitpid routes.");
+                return;
+            }
+
+            using var cts = new CancellationTokenSource(TestTimeoutMs);
+            using IPtyConnection terminal = await PtyProvider.SpawnAsync(Shell("BlockingExitCode", useAsyncIo: false), cts.Token);
+
+            var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            terminal.ProcessExited += (_, e) => exited.TrySetResult(e.ExitCode);
+
+            var drain = ReadUntilAsync(terminal, "\u0000never\u0000", TimeSpan.FromSeconds(15));
+
+            byte[] command = Encoding.UTF8.GetBytes("exit 42\n");
+            terminal.WriterStream.Write(command, 0, command.Length);
+            terminal.WriterStream.Flush();
+
+            var reported = await Task.WhenAny(exited.Task, Task.Delay(TimeSpan.FromSeconds(15), cts.Token));
+            reported.Should().Be(exited.Task);
+            await drain;
+            (await exited.Task).Should().Be(42);
+        }
+
+        [TestMethod]
+        public async Task AsyncIo_SurvivesChurn_WithoutLeakingDescriptorsThreadsOrCpu()
+        {
+            // Three leaks are possible here and none of them announces itself. Descriptors: this
+            // repo has already seen pty_spawn start failing with ENXIO after enough sessions came
+            // and went, which reads as a system limit rather than a leak. Threads: a shared poller
+            // and reaper are only shared if nothing per-session sneaks back in. CPU: a registration
+            // left in the poll set after its child exits returns from every poll immediately,
+            // because POLLHUP is reported whether or not it was asked for, and the loop spins.
+            const int Rounds = 40;
+
+            await WarmUpSharedThreadsAsync();
+            using var cts = new CancellationTokenSource(TestTimeoutMs);
+
+            int threadsBefore = Process.GetCurrentProcess().Threads.Count;
+            TimeSpan cpuBefore = Process.GetCurrentProcess().TotalProcessorTime;
+            var wall = Stopwatch.StartNew();
+
+            for (var i = 0; i < Rounds; i++)
+            {
+                using IPtyConnection terminal = await PtyProvider.SpawnAsync(Shell($"Churn{i}", useAsyncIo: true), cts.Token);
+                await ReadUntilAsync(terminal, "$", TimeSpan.FromSeconds(5));
+                terminal.Kill();
+                terminal.WaitForExit(2000);
+            }
+
+            // Idle afterwards, so what is measured below is the loop at rest rather than the work.
+            await Task.Delay(2000, cts.Token);
+
+            wall.Stop();
+            int threadsAfter = Process.GetCurrentProcess().Threads.Count;
+            TimeSpan cpuAfter = Process.GetCurrentProcess().TotalProcessorTime;
+
+            double cpuRatio = (cpuAfter - cpuBefore).TotalMilliseconds / wall.Elapsed.TotalMilliseconds;
+            Console.WriteLine(
+                $"churn over {Rounds} sessions: threads {threadsBefore} -> {threadsAfter}, " +
+                $"cpu {(cpuAfter - cpuBefore).TotalMilliseconds:F0}ms over {wall.Elapsed.TotalMilliseconds:F0}ms wall (ratio {cpuRatio:F2})");
+
+            (threadsAfter - threadsBefore).Should().BeLessThan(
+                5,
+                "{0} sessions came and went; nothing should have accumulated", Rounds);
+
+            cpuRatio.Should().BeLessThan(
+                1.0,
+                "a poll loop spinning on a hung-up descriptor would burn a core continuously");
+        }
+
+        [TestMethod]
+        public async Task AsyncIo_ThreadCostDoesNotScaleWithSessionCount()
+        {
+            // The property worth pinning, and the one a comparison against blocking I/O does not
+            // state: the cost is a CONSTANT -- one poller and one reaper for the process -- rather
+            // than a smaller per-session number. Measured at two sizes because a per-session cost of
+            // one thread and a constant cost of two are indistinguishable at a single size.
+            await WarmUpSharedThreadsAsync();
+
+            int small = await MeasureIdleThreadGrowthAsync(6, useAsyncIo: true);
+            int large = await MeasureIdleThreadGrowthAsync(24, useAsyncIo: true);
+
+            Console.WriteLine($"async idle thread growth: 6 sessions={small}, 24 sessions={large}");
+
+            large.Should().BeLessThanOrEqualTo(
+                small + 2,
+                "quadrupling the session count must not multiply the thread count; the poller and reaper are shared");
+            large.Should().BeLessThan(
+                6,
+                "24 idle sessions should cost a handful of threads at most, not one apiece");
+        }
+
+        [TestMethod]
         public async Task AsyncIo_CostsFewerThreadsPerIdleSession_ThanBlockingIo()
         {
-            // The only test here that can fail against the blocking path, and the only one that says
-            // anything about whether the option is worth having. Measured both ways in one process
-            // so the numbers are comparable.
             const int Sessions = 12;
+
+            await WarmUpSharedThreadsAsync();
 
             int blocking = await MeasureIdleThreadGrowthAsync(Sessions, useAsyncIo: false);
             int asyncIo = await MeasureIdleThreadGrowthAsync(Sessions, useAsyncIo: true);
@@ -123,7 +254,23 @@ namespace Porta.Pty.Tests
 
             asyncIo.Should().BeLessThan(
                 blocking,
-                "reads that wait on the shared poller should not each hold a thread");
+                "neither the reads nor the child watch should hold a thread per session");
+        }
+
+        /// <summary>
+        /// Starts the shared poller and reaper before anything is measured.
+        /// </summary>
+        /// <remarks>
+        /// They are created on first use, so without this the first measurement carries their two
+        /// threads and reads as a per-session cost that is not one.
+        /// </remarks>
+        private static async Task WarmUpSharedThreadsAsync()
+        {
+            using var cts = new CancellationTokenSource(TestTimeoutMs);
+            using IPtyConnection warm = await PtyProvider.SpawnAsync(Shell("WarmUp", useAsyncIo: true), cts.Token);
+            await ReadUntilAsync(warm, "$", TimeSpan.FromSeconds(5));
+            warm.Kill();
+            warm.WaitForExit(5000);
         }
 
         private static async Task<int> MeasureIdleThreadGrowthAsync(int sessions, bool useAsyncIo)

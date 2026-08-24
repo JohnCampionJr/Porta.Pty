@@ -36,6 +36,7 @@ namespace Porta.Pty.Unix
 
         private readonly object gate = new();
         private readonly Dictionary<int, Registration> registrations = new();
+        private readonly List<int> stale = new();
         private readonly int wakeupReadFd;
         private readonly int wakeupWriteFd;
 
@@ -153,6 +154,30 @@ namespace Porta.Pty.Unix
 
                 lock (this.gate)
                 {
+                    // Drop registrations nobody is waiting on any more. Leaving them in is not
+                    // merely untidy: poll reports POLLHUP, POLLERR and POLLNVAL whether or not they
+                    // were asked for, so a descriptor whose child has exited returns from every
+                    // poll immediately, and a set full of those is a spin at full CPU rather than a
+                    // thread parked in the kernel. A registration now lives exactly as long as a
+                    // waiter does.
+                    if (this.stale.Count > 0)
+                    {
+                        this.stale.Clear();
+                    }
+
+                    foreach (var pair in this.registrations)
+                    {
+                        if (pair.Value.InterestedEvents == 0)
+                        {
+                            this.stale.Add(pair.Key);
+                        }
+                    }
+
+                    foreach (var fd in this.stale)
+                    {
+                        this.registrations.Remove(fd);
+                    }
+
                     set = new PollFd[this.registrations.Count + 1];
                     fdOrder = new int[this.registrations.Count];
                     set[0] = new PollFd { Fd = this.wakeupReadFd, Events = POLLIN };
